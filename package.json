@@ -1,0 +1,27 @@
+{
+  "name": "automationprojects",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@computer-use/nut-js": "^4.2.0",
+    "@nut-tree-fork/nut-js": "^4.2.6",
+    "archiver": "^7.0.1",
+    "clipboardy": "^5.0.0",
+    "exceljs": "^4.4.0",
+    "express": "^5.1.0",
+    "moment": "^2.30.1",
+    "mongodb": "^6.20.0",
+    "mongoose": "^8.19.2",
+    "nodemailer": "^7.0.10",
+    "pdf-lib": "^1.17.1",
+    "playwright": "^1.55.1",
+    "xlsx": "^0.18.5"
+  }
+}
