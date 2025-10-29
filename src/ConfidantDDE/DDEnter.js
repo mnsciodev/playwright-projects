@@ -275,9 +275,9 @@ for (const claim of claims) {
       ]);
     }
 
-    const screenshotPath = `screenshots/claim_${claim._id}.png`;
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`📸 Screenshot saved: ${screenshotPath}`);
+    // const screenshotPath = `screenshots/claim_${claim._id}.png`;
+    // await page.screenshot({ path: screenshotPath, fullPage: true });
+    // console.log(`📸 Screenshot saved: ${screenshotPath}`);
   } catch (claimErr) {
     console.error(`❌ Error processing claim ${claim._id}:`, claimErr.message);
     const currentDate = new Date();
