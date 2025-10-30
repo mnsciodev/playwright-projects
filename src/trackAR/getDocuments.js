@@ -49,7 +49,7 @@ async function updateDocumentList(db, recordId, DocumentList) {
 
 // ----------------` Login Once ----------------
 async function loginOnce() {
-    const browser = await chromium.launch({ headless: false });
+    const browser = await chromium.launch({ channel: "chrome",headless: false });
     const context = await browser.newContext();
     const page = await context.newPage();
 
@@ -240,7 +240,7 @@ async function runAutomation() {
     // ✅ One browser, one context (shared login session)
     const workerCount = allRecords.length < 4 ? allRecords.length : 4;
 
-    const browser = await chromium.launch({ headless: false });
+    const browser = await chromium.launch({  channel: "chrome", headless: false });
     const context = await browser.newContext({ storageState: sessionPath });
     // ✅ Create 4 tabs in same context
     const pages = await Promise.all(Array.from({ length: workerCount }, () => context.newPage()));
