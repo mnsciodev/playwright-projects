@@ -8,7 +8,7 @@ const { mouse } = require("@computer-use/nut-js");
 mouse.config.mouseSpeed = 800;
 
 // MongoDB connection setup
-const uri = 'mongodb+srv://scioms:5NHRcnbEjLaXefKF@scioms.n5hcu.mongodb.net/scio?retryWrites=true&w=majority'; // update your DB URI
+const uri = 'mongodb://localhost:27017/'; // update your DB URI
 const client = new MongoClient(uri);
 
 
@@ -26,8 +26,8 @@ const transporter = nodemailer.createTransport({
 async function sendCompletionMail(totalPatients, successCount, failCount, startTime, endTime, excelPath) {
     const mailOptions = {
         from: '"SCIO Automation Hospital Records" <trackar@scioms.com>',
-        to: ['sudha@scioms.com',"nshree@scioms.com"],
-        cc: ['mnavaladi@scioms.com', 'jganesh@scioms.com',"rathi@scioms.com"],
+        to: ["nshree@scioms.com"],
+        cc: ['sudha@scioms.com', 'jganesh@scioms.com',"rathi@scioms.com","mnavaladi@scioms.com"],
         subject: `Hospital Records and Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
         html: `
             <h2>Automation Run Summary</h2>
@@ -42,17 +42,14 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                <p>📎 The detailed report is attached as an Excel file.</p>
             <p>This is an automated message from the SCIO Automation PlayWright.</p>
         `,
+        attachments: [
+            {
+                filename: 'Automation_Report.xlsx',
+                path: excelPath
+            }
+        ]
     };
-    if (excelPath) {
-        Object.assign(mailOptions, {
-            attachments: [
-                {
-                    filename: 'Automation_Report.xlsx',
-                    path: excelPath
-                }
-            ]
-        })
-    }
+
     try {
         await transporter.sendMail(mailOptions);
         console.info('Completion email sent successfully');
@@ -69,14 +66,11 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
 
     try {
         await client.connect();
-        const database = client.db('scyotools');
-        const patientsCollection = database.collection('mmh');
-        var CurrentDate = moment().format("MM/DD/YYYY")
+        const database = client.db('amammh');
+        const patientsCollection = database.collection('mmhmanual');
+        var CurrentDate = moment().format("MMDDYYYY")
         const patientsCursor = patientsCollection.find({
-            Ready: null,
-            "Bot Status": "Success",
-            CurrentDate: CurrentDate,
-            Practice: "Hospital records"
+            Ready: "Pending",
         });
         const patients = await patientsCursor.toArray();
 
@@ -149,7 +143,6 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
             await sendCompletionMail("Login Attempt Failed", 0, 0, startTime, endTime, null);
             console.log('❌ Could not confirm login — please check CAPTCHA or credentials.');
         }
-
         for (const patient of patients) {
             let status = 'Pending';
             let errorMsg = '';
@@ -223,8 +216,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
 
                 await page.waitForSelector('#modalPatientDocs', { state: 'visible' });
 
-                await page.fill("#patientdocsIpt1",patient.Practice)
-                const hospitalRecordsFolder = page.locator('#modalPatientDocs a.active', { hasText: patient.Practice }).first();
+                const hospitalRecordsFolder = page.locator('#modalPatientDocs a.active', { hasText: "Hospital Records" }).first();
 
                 await hospitalRecordsFolder.click();
 
@@ -233,7 +225,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                     page.locator('#modalPatientDocs #patientdocsBtn4').click(),
                 ]);
 
-                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\${CurrentDate}\\${patient.FileName}`
+                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\manual\\${patient.FileName}`
                 await fileChooser.setFiles(filesToUpload);
 
                 const closeModal = async (modalSelector, closeBtnSelector, modalName) => {
@@ -274,23 +266,8 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
             }
 
             processedRecords.push({
-                Name: patient['Patient name'],
-                'MRN Number': patient['MRN Number'],
-                DOB: patient['DOB'],
-                DOS: patient['DOS'],
-                'Sex/Age': patient['Sex/Age'],
-                Location: patient['Location'],
-                "Provider Name": patient['Provider Name'],
-                'Patient Status new/Old': patient['Patient Status new/Old'],
-                Misc: patient['Misc'],
-                'Attending Provider': patient['Attending Provider'],
-                Admit: patient['Admit'],
-                'Bot Status': patient['Bot Status'],
-                'Bot Remarks': patient['Bot Remarks'],
-
-                FileName: patient['FileName'] || '',
+                ...patient,
                 Ready: patient.Ready,
-                FilePath: patient['FilePath'],
                 Status: status,
                 Error: errorMsg
             });

@@ -25,10 +25,10 @@ const transporter = nodemailer.createTransport({
 // ✅ Helper: Send completion email
 async function sendCompletionMail(totalPatients, successCount, failCount, startTime, endTime, excelPath) {
     const mailOptions = {
-        from: '"SCIO Automation Hospital Records" <trackar@scioms.com>',
+        from: '"SCIO Automation Patient Documents" <trackar@scioms.com>',
         to: ['sudha@scioms.com',"nshree@scioms.com"],
         cc: ['mnavaladi@scioms.com', 'jganesh@scioms.com',"rathi@scioms.com"],
-        subject: `Hospital Records and Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
+        subject: `Patient Documents and Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
         html: `
             <h2>Automation Run Summary</h2>
             <p><b>Total Patients:</b> ${totalPatients}</p>
@@ -72,11 +72,12 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
         const database = client.db('scyotools');
         const patientsCollection = database.collection('mmh');
         var CurrentDate = moment().format("MM/DD/YYYY")
+        var FolderCurrentDate = moment().format("MMDDYYYY")
         const patientsCursor = patientsCollection.find({
             Ready: null,
             "Bot Status": "Success",
             CurrentDate: CurrentDate,
-            Practice: "Hospital records"
+            Practice: "Patient Documents"
         });
         const patients = await patientsCursor.toArray();
 
@@ -233,7 +234,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                     page.locator('#modalPatientDocs #patientdocsBtn4').click(),
                 ]);
 
-                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\${CurrentDate}\\${patient.FileName}`
+                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\${FolderCurrentDate}\\${patient.FileName}`
                 await fileChooser.setFiles(filesToUpload);
 
                 const closeModal = async (modalSelector, closeBtnSelector, modalName) => {
