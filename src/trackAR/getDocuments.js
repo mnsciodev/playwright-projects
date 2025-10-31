@@ -47,7 +47,7 @@ async function updateDocumentList(db, recordId, DocumentList) {
     await collection.updateOne({ _id }, { $set: { NeedToCheck: "No", DocumentList: DocumentList } });
 }
 
-// ---------------- Login Once ----------------
+// ----------------` Login Once ----------------
 async function loginOnce() {
     const browser = await chromium.launch({ channel: "chrome",headless: false });
     const context = await browser.newContext();
