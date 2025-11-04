@@ -468,6 +468,137 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                         }
                     }
 
+                    // for (const row of rows) {
+                    //     const collectionDate = await row.$eval('td:nth-child(6) span', el => el.textContent.trim());
+                    //     if (!collectionDate.includes(patient.dos)) continue;
+
+                    //     matchedCount++;
+                    //     const cleanDate = collectionDate.replace(/[/: ]/g, '_');
+                    //     const ts = Date.now();
+                    //     const resultPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Result_${cleanDate}_${ts}.pdf`);
+                    //     const orderPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Order_${cleanDate}_${ts}.pdf`);
+                    //     const mergedPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
+
+                    //     // ---------------- RESULT PDF ----------------
+                    //     try {
+                    //         const actionsMenu = await row.$('a.pccActionMenu');
+                    //         await actionsMenu.click();
+
+                    //         // extract onclick JS for View Results
+                    //         const viewResultsOnclick = await page.evaluate(el => {
+                    //             const li = el.querySelector('li[onclick*="viewReportPopup"]');
+                    //             return li ? li.getAttribute('onclick') : null;
+                    //         }, row);
+
+                    //         if (!viewResultsOnclick) throw new Error('No View Results onclick found');
+
+                    //         const paramsMatch = viewResultsOnclick.match(/viewReportPopup\((.+)\)/);
+                    //         if (!paramsMatch) throw new Error('Invalid View Results onclick format');
+                    //         const params = paramsMatch[1];
+
+                    //         const [popup] = await Promise.all([
+                    //             page.waitForEvent('popup', { timeout: 10000 }),
+                    //             page.evaluate(`viewReportPopup(${params})`)
+                    //         ]);
+                    //         if (!popup) throw new Error("No popup appeared for View Results");
+
+                    //         await popup.waitForLoadState('domcontentloaded');
+                    //         const viewFileBtn = await popup.$('#viewFileButton');
+
+                    //         if (viewFileBtn) {
+                    //             const [pdfPopup] = await Promise.all([
+                    //                 popup.context().waitForEvent('page', { timeout: 10000 }),
+                    //                 viewFileBtn.click()
+                    //             ]).catch(() => []);
+                    //             if (!pdfPopup) throw new Error("PDF popup not found");
+
+                    //             await pdfPopup.waitForLoadState('domcontentloaded');
+                    //             const pdfUrl = pdfPopup.url();
+                    //             const pdfResponse = await page.request.get(pdfUrl);
+                    //             const contentType = (pdfResponse.headers()['content-type'] || '').toLowerCase();
+
+                    //             if (contentType.includes('application/pdf')) {
+                    //                 fs.writeFileSync(resultPdfPath, await pdfResponse.body());
+                    //                 await Patient.updateOne({ _id: patient._id }, {
+                    //                     $set: { status: "success", message: "Result PDF Saved", resultPdfPath }
+                    //                 });
+                    //             } else {
+                    //                 throw new Error(`Non-PDF response: ${contentType}`);
+                    //             }
+                    //             await pdfPopup.close();
+                    //         }
+                    //         await popup.close();
+
+                    //     } catch (err) {
+                    //         console.error(`❌ Result PDF Error: ${err.message}`);
+                    //         await Patient.updateOne({ _id: patient._id }, {
+                    //             $set: { status: "Failed", message: `Result download error: ${err.message}` }
+                    //         });
+                    //         continue;
+                    //     }
+
+                    //     // ---------------- ORDER PDF ----------------
+                    //     try {
+                    //         console.log(`🧾 Downloading order for ${collectionDate}...`);
+                    //         const actionsMenu = await row.$('a.pccActionMenu');
+                    //         await actionsMenu.click();
+
+                    //         // extract onclick JS for View Order
+                    //         const viewOrderOnclick = await page.evaluate(el => {
+                    //             const li = el.querySelector('li[onclick*="viewPhysOrder"]');
+                    //             return li ? li.getAttribute('onclick') : null;
+                    //         }, row);
+
+                    //         if (!viewOrderOnclick) {
+                    //             console.log(`ℹ️ No "View Order" found`);
+                    //             continue;
+                    //         }
+
+                    //         const paramsMatch = viewOrderOnclick.match(/viewPhysOrder\((.+)\)/);
+                    //         if (!paramsMatch) throw new Error("Invalid View Order onclick format");
+                    //         const params = paramsMatch[1];
+
+                    //         const [popupOrder] = await Promise.all([
+                    //             page.waitForEvent('popup', { timeout: 10000 }),
+                    //             page.evaluate(`viewPhysOrder(${params})`)
+                    //         ]);
+                    //         if (!popupOrder) throw new Error("No popup appeared for View Order");
+
+                    //         await popupOrder.waitForLoadState('domcontentloaded');
+                    //         await popupOrder.evaluate(() => {
+                    //             const d = document.querySelector('#detail');
+                    //             if (d) { d.style.height = '800px'; d.style.overflowY = 'visible'; }
+                    //             document.body.style.zoom = '0.55';
+                    //         });
+
+                    //         const fullHeight = await popupOrder.evaluate(() => document.body.scrollHeight);
+                    //         await popupOrder.setViewportSize({ width: 1200, height: fullHeight });
+                    //         await popupOrder.pdf({ path: orderPdfPath, format: 'A4', printBackground: true });
+                    //         await popupOrder.close();
+
+                    //         if (fs.existsSync(orderPdfPath)) {
+                    //             console.log(`✅ Order PDF saved`);
+                    //             await mergePdfs(resultPdfPath, orderPdfPath, mergedPdfPath);
+
+                    //             if (fs.existsSync(mergedPdfPath)) {
+                    //                 await Patient.updateOne({ _id: patient._id }, {
+                    //                     $set: { mergedPdfs: mergedPdfPath, statusOrder: "success", messageOrder: "Merged PDF created" }
+                    //                 });
+                    //             }
+                    //         }
+
+                    //         try { if (fs.existsSync(resultPdfPath)) fs.unlinkSync(resultPdfPath); } catch { }
+                    //         try { if (fs.existsSync(orderPdfPath)) fs.unlinkSync(orderPdfPath); } catch { }
+
+                    //     } catch (err) {
+                    //         console.error(`❌ Order download error: ${err.message}`);
+                    //         await Patient.updateOne({ _id: patient._id }, {
+                    //             $set: { statusOrder: "Failed", messageOrder: `Order download error: ${err.message}` }
+                    //         });
+                    //     }
+                    // }
+
+
                     if (matchedCount === 0) {
                         await Patient.updateOne({ _id: patient._id }, {
                             $set: { status: "Failed", message: "No matching DOS found" }

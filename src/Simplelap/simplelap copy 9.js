@@ -30,8 +30,8 @@ const patientSchema = new mongoose.Schema({
     ],
     dosMatchedCount: { type: Number, default: 0 },
     message: String,
-    statusOrder: String,
-    messageOrder: String
+    statusOrder :String,
+    messageOrder : String
 }, { timestamps: true });
 
 const Patient = mongoose.model('patients', patientSchema);
@@ -131,138 +131,6 @@ async function selectFacilityWithRetry(page, facilityName, maxRetries = 3, delay
             console.log(`⏳ Retrying in ${delay / 1000}s...`);
             await page.waitForTimeout(delay);
         }
-    }
-}
-// ---------------- Retry helper ----------------
-async function retryAsync(fn, retries = 3, delayMs = 1000) {
-    let lastError;
-    for (let attempt = 1; attempt <= retries; attempt++) {
-        try {
-            return await fn();
-        } catch (err) {
-            lastError = err;
-            console.warn(`⚠️ Attempt ${attempt} failed: ${err.message}`);
-            if (attempt < retries) await new Promise(res => setTimeout(res, delayMs));
-        }
-    }
-    throw lastError;
-}
-
-// ---------------- Download Result PDF ----------------
-async function downloadResultPdf(page, row, patient, resultPdfPath) {
-    try {
-        const viewResultsOnclick = await page.evaluate(el => {
-            const li = el.querySelector('ul.pccMenuWrapper li[onclick*="viewReportPopup"]');
-            return li ? li.getAttribute('onclick') : null;
-        }, row);
-
-        if (!viewResultsOnclick) throw new Error('No "View Results" onclick found');
-
-        const paramsMatch = viewResultsOnclick.match(/viewReportPopup\((.+)\)/);
-        const params = paramsMatch[1];
-
-        const [popup] = await Promise.all([
-            page.waitForEvent('popup', { timeout: 15000 }),
-            page.evaluate(`viewReportPopup(${params})`)
-        ]);
-
-        await popup.waitForLoadState('domcontentloaded');
-
-        const viewFileBtn = await popup.$('#viewFileButton');
-        if (!viewFileBtn) throw new Error("No viewFileButton found");
-
-        const [pdfPopup] = await Promise.all([
-            popup.context().waitForEvent('page', { timeout: 15000 }),
-            viewFileBtn.click()
-        ]);
-
-        await pdfPopup.waitForLoadState('domcontentloaded');
-
-        const pdfUrl = pdfPopup.url();
-        const pdfResponse = await page.request.get(pdfUrl);
-        const contentType = (pdfResponse.headers()['content-type'] || '').toLowerCase();
-        if (!contentType.includes('application/pdf')) throw new Error(`Non-PDF response: ${contentType}`);
-
-        fs.writeFileSync(resultPdfPath, await pdfResponse.body());
-        console.log(`✅ Result PDF saved: ${resultPdfPath}`);
-
-        await pdfPopup.close();
-        await popup.close();
-
-        await Patient.updateOne({ _id: patient._id }, {
-            $set: { status: "success", message: "Result PDF saved", resultPdfs : resultPdfPath }
-        });
-
-    } catch (err) {
-        console.error(`❌ Result PDF error: ${err.message}`);
-        await Patient.updateOne({ _id: patient._id }, {
-            $set: { status: "Failed", message: `Result download error: ${err.message}` }
-        });
-        throw err;
-    }
-}
-
-// ---------------- Download Order PDF ----------------
-async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath, mergedPdfPath) {
-    try {
-        const viewOrderOnclick = await page.evaluate(el => {
-            const li = el.querySelector('ul.pccMenuWrapper li[onclick*="viewPhysOrder"]');
-            return li ? li.getAttribute('onclick') : null;
-        }, row);
-
-        if (!viewOrderOnclick) {
-            console.log(`ℹ️ No "View Order" found`);
-            return;
-        }
-
-        const paramsMatch = viewOrderOnclick.match(/viewPhysOrder\((.+)\)/);
-        const params = paramsMatch[1];
-
-        const [popupOrder] = await Promise.all([
-            page.waitForEvent('popup', { timeout: 15000 }),
-            page.evaluate(`viewPhysOrder(${params})`)
-        ]);
-
-        await popupOrder.waitForLoadState('domcontentloaded');
-
-        // Adjust layout for PDF
-        await popupOrder.evaluate(() => {
-            const d = document.querySelector('#detail');
-            if (d) { d.style.height = '800px'; d.style.overflowY = 'visible'; }
-            document.body.style.zoom = '0.55';
-        });
-
-        const fullHeight = await popupOrder.evaluate(() => document.body.scrollHeight);
-        await popupOrder.setViewportSize({ width: 1200, height: fullHeight });
-
-        await popupOrder.pdf({ path: orderPdfPath, format: 'A4', printBackground: true });
-        await popupOrder.close();
-
-        console.log(`✅ Order PDF saved: ${orderPdfPath}`);
-
-        // Merge PDFs
-        await mergePdfs(resultPdfPath, orderPdfPath, mergedPdfPath);
-
-        if (fs.existsSync(mergedPdfPath)) {
-            await Patient.updateOne({ _id: patient._id }, {
-                $set: {
-                    mergedPdfs: mergedPdfPath,
-                    statusOrder: "success",
-                    messageOrder: "Merged PDF created"
-                }
-            });
-        }
-
-        // Clean up temporary PDFs
-        try { fs.existsSync(resultPdfPath) && fs.unlinkSync(resultPdfPath); } catch {}
-        try { fs.existsSync(orderPdfPath) && fs.unlinkSync(orderPdfPath); } catch {}
-
-    } catch (err) {
-        console.error(`❌ Order PDF error: ${err.message}`);
-        await Patient.updateOne({ _id: patient._id }, {
-            $set: { statusOrder: "Failed", messageOrder: `Order download error: ${err.message}` }
-        });
-        throw err;
     }
 }
 
@@ -441,29 +309,113 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                     }
 
                     let matchedCount = 0;
+
                     for (const row of rows) {
+                        const collectionDate = await row.$eval('td:nth-child(6) span', el => el.textContent.trim());
+                        if (!collectionDate.includes(patient.dos)) continue;
+
+                        matchedCount++;
+                        const cleanDate = collectionDate.replace(/[/: ]/g, '_');
+                        const ts = Date.now();
+                        const resultPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Result_${cleanDate}_${ts}.pdf`);
+                        const orderPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Order_${cleanDate}_${ts}.pdf`);
+                        const mergedPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
+
+                        // ---- RESULT PDF ----
                         try {
-                            const collectionDate = await row.$eval('td:nth-child(6) span', el => el.textContent.trim());
-                            if (!collectionDate.includes(patient.dos)) continue;
+                            const actionsMenu = await row.$('a.pccActionMenu');
+                            await actionsMenu.click();
+                            const viewResults = await row.$('li:has-text("View Results")');
 
-                            matchedCount++;
+                            if (viewResults) {
+                                const [popup] = await Promise.all([
+                                    page.waitForEvent('popup', { timeout: 10000 }),
+                                    viewResults.click()
+                                ]).catch(() => []);
+                                if (!popup) throw new Error("No popup appeared for View Results");
 
-                            const cleanDate = collectionDate.replace(/[/: ]/g, '_');
-                            const ts = Date.now();
-                            const resultPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Result_${cleanDate}_${ts}.pdf`);
-                            const orderPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Order_${cleanDate}_${ts}.pdf`);
-                            const mergedPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
+                                await popup.waitForLoadState('domcontentloaded');
+                                const viewFileBtn = await popup.$('#viewFileButton');
+                                if (viewFileBtn) {
+                                    const [pdfPopup] = await Promise.all([
+                                        popup.context().waitForEvent('page', { timeout: 10000 }),
+                                        viewFileBtn.click()
+                                    ]).catch(() => []);
+                                    if (!pdfPopup) throw new Error("PDF popup not found");
 
-                            // ---------- RESULT PDF ----------
-                            await retryAsync(() => downloadResultPdf(page, row, patient, resultPdfPath), 3, 5000);
+                                    await pdfPopup.waitForLoadState('domcontentloaded');
+                                    const pdfUrl = pdfPopup.url();
+                                    const pdfResponse = await page.request.get(pdfUrl);
+                                    const contentType = (pdfResponse.headers()['content-type'] || '').toLowerCase();
 
-                            // ---------- ORDER PDF ----------
-                            await retryAsync(() => downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath, mergedPdfPath), 3, 5000);
+                                    if (contentType.includes('application/pdf')) {
+                                        fs.writeFileSync(resultPdfPath, await pdfResponse.body());
+                                        await Patient.updateOne({ _id: patient._id }, {
+                                            $set: { status: "success", message: "Result PDF Saved", resultPdfPath }
+                                        });
+                                    } else {
+                                        throw new Error(`Non-PDF response: ${contentType}`);
+                                    }
+
+                                    await pdfPopup.close();
+                                }
+                                await popup.close();
+                            }
+                        } catch (err) {
+                            await Patient.updateOne({ _id: patient._id }, {
+                                $set: { status: "Failed", message: `Result download error: ${err.message}` }
+                            });
+                            continue;
+                        }
+
+                        // ---- ORDER PDF ----
+                        try {
+                            console.log(`🧾 Downloading order for ${collectionDate}...`);
+                            const actionMenuLocator = await row.$('a.pccActionMenu');
+                            await actionMenuLocator.click({ timeout: 5000 });
+
+                            const viewOrderLocator = row.$('li:has-text("View Order")');
+                            if (viewOrderLocator) {
+                                console.log(`ℹ️ No "View Order" found`);
+                                continue;
+                            }
+
+                            const [popupOrder] = await Promise.all([
+                                page.waitForEvent('popup', { timeout: 10000 }),
+                                viewOrderLocator.click()
+                            ]).catch(() => []);
+                            if (!popupOrder) throw new Error("No popup appeared for View Order");
+
+                            await popupOrder.waitForLoadState('domcontentloaded');
+                            await popupOrder.evaluate(() => {
+                                const d = document.querySelector('#detail');
+                                if (d) { d.style.height = '800px'; d.style.overflowY = 'visible'; }
+                                document.body.style.zoom = '0.55';
+                            });
+                            const fullHeight = await popupOrder.evaluate(() => document.body.scrollHeight);
+                            await popupOrder.setViewportSize({ width: 1200, height: fullHeight });
+                            await popupOrder.pdf({ path: orderPdfPath, format: 'A4', printBackground: true });
+                            await popupOrder.close();
+
+                            if (fs.existsSync(orderPdfPath)) {
+                                console.log(`✅ Order PDF saved`);
+                                await mergePdfs(resultPdfPath, orderPdfPath, mergedPdfPath);
+
+                                if (fs.existsSync(mergedPdfPath)) {
+                                    await Patient.updateOne({ _id: patient._id }, {
+                                        $set: { mergedPdfs: mergedPdfPath, statusOrder: "success", messageOrder: "Merged PDF created" }
+                                    });
+                                }
+                            }
+
+                            // Cleanup safely
+                            try { if (fs.existsSync(resultPdfPath)) fs.unlinkSync(resultPdfPath); } catch { }
+                            try { if (fs.existsSync(orderPdfPath)) fs.unlinkSync(orderPdfPath); } catch { }
 
                         } catch (err) {
-                            console.error(`❌ Failed after retries for patient ${patient.ResidentID}: ${err.message}`);
+                            console.error("❌ Order download error:", err.message);
                             await Patient.updateOne({ _id: patient._id }, {
-                                $set: { status: "Failed", message: `Failed after retries: ${err.message}` }
+                                $set: { statusOrder: "Failed", messageOrder: `Order download error: ${err.message}` }
                             });
                         }
                     }
