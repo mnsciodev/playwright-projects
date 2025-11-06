@@ -308,7 +308,7 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
             const facilityName = GetLocation._id.Client;
             console.info("🏥 Facility:", facilityName, "| Pending:", count);
 
-            const GetLogin = await Login.findOne({ Client: facilityName });
+            const GetLogin = await Login.findOne({Client:{$regex:facilityName.split(" ")[0],$options:"i"}});
             if (!GetLogin) {
                 console.error(`❌ No login credentials found for ${facilityName}`);
                 continue;
