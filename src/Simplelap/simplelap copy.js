@@ -89,6 +89,19 @@ async function selectFacilityWithRetry(page, facilityName, maxRetries = 3, delay
     return false;
 }
 
+async function retryClick(page, selector, maxRetries = 5, delay = 1000) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            await page.click(selector, { timeout: 2000 });
+            console.log(`Click successful on attempt ${attempt}`);
+            return;
+        } catch (error) {
+            console.warn(`Attempt ${attempt} failed: ${error.message}`);
+            if (attempt < maxRetries) await page.waitForTimeout(delay);
+            else throw new Error(`Failed to click ${selector} after ${maxRetries} attempts`);
+        }
+    }
+}
 (async () => {
     const browser = await chromium.launch({ headless: false, channel: 'chrome' });
     const context = await browser.newContext();
@@ -127,126 +140,169 @@ async function selectFacilityWithRetry(page, facilityName, maxRetries = 3, delay
         console.log('✅ Dashboard loaded successfully.');
 
         await page.waitForSelector('#searchField', { state: 'visible', timeout: 60000 });
-        var facilityName = "ELEVATE CARE CHICAGO NORTH"
-        const selected = await selectFacilityWithRetry(page, facilityName, 3, 3000);
-        if (!selected) {
-            console.error(`🚫 Skipping facility: ${facilityName}`);
+        // var facilityName = "ELEVATE CARE CHICAGO NORTH"
+        // const selected = await selectFacilityWithRetry(page, facilityName, 3, 3000);
+        // if (!selected) {
+        //     console.error(`🚫 Skipping facility: ${facilityName}`);
 
-        }
-        var ResidentID = "GC19740"
-        // 6️⃣ Enter search value
-        await page.fill('#searchField', ResidentID);
+        // }
 
-        // Press Enter and wait for the search results to load
-        await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { }), // catches if SPA navigation doesn't occur
-            page.keyboard.press('Enter')
-        ]);
-
-
-        await page.click('a[href*="labResults.xhtml"]');
-
-        await page.waitForSelector('#filterTrigger', { state: 'visible', timeout: 30000 });
-
-        // 3️⃣ Expand "Display Filters" if not already expanded
-        const filterImg = await page.$('#filterTrigger img.plussign_img');
-        const src = await filterImg.getAttribute('src');
-
-        if (src.includes('newplus.gif')) {
-            // Only click if filters are collapsed
-            await page.click('#filterTrigger');
-            // Wait for the image to change to minus
-            await page.waitForFunction(() => {
-                const img = document.querySelector('#filterTrigger img.plussign_img');
-                return img && img.src.includes('newminus.gif');
-            }, { timeout: 10000 });
-        }
-
-        // 4️⃣ Clear the date fields
-        await page.fill('#reported_date_dummy', '');
-        await page.fill('#collection_date_dummy', '');
-
-        // 5️⃣ Click the Search button
-        await Promise.all([
-            page.waitForLoadState('networkidle'), // wait until search results load
-            page.click('#refreshButtonId')
-        ]);
-
-
-        console.log('✅ Logged in and entered search value successfully.');
-        const rows = await page.$$('#resultsTable tbody tr');
-        var cleanDate = "9/23/2025"
-
-        for (const row of rows) {
-            const ts = Date.now();
-            const collectionDate = await row.$eval('td:nth-child(6) span', el => el.textContent.trim());
-            if (collectionDate.includes("9/23/2025")) {
-
-                const resultPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Result_${cleanDate}_${ts}.pdf`);
-                const orderPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Order_${cleanDate}_${ts}.pdf`);
-                const mergedPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
-                const actionsMenu = await row.$('a.pccActionMenu');
-                await actionsMenu.click();
-                const viewResults = await row.$('li:has-text("View Results")');
-                const [popup] = await Promise.all([page.waitForEvent('popup'), viewResults.click()]);
-                await popup.waitForLoadState('domcontentloaded');
-
-                const viewFileBtn = await popup.$('#viewFileButton');
-                if (viewFileBtn) {
-
-                    const [pdfPopup] = await Promise.all([
-                        popup.context().waitForEvent('page'),
-                        viewFileBtn.click()
-                    ]);
-                    await pdfPopup.waitForLoadState('domcontentloaded');
-                    const pdfUrl = pdfPopup.url();
-
-                    // request and check content-type
-                    const pdfResponse = await page.request.get(pdfUrl);
-                    const contentType = (pdfResponse.headers()['content-type'] || '').toLowerCase();
-                    if (contentType.includes('application/pdf')) {
-                        fs.writeFileSync(resultPdfPath, await pdfResponse.body());
-
-
-                    }
-                    await pdfPopup.close();
-                }
-                await popup.close();
-
-                // --- VIEW ORDER POPUP ---
-                const actionsMenuOrder = await row.$('a.pccActionMenu');
-                await actionsMenuOrder.click();
-                const viewOrder = await row.$('li:has-text("View Order")');
-                if (viewOrder) {
-                    const [popupOrder] = await Promise.all([page.waitForEvent('popup'), viewOrder.click()]);
-                    await popupOrder.waitForLoadState('domcontentloaded');
-
-                    await popupOrder.evaluate(() => {
-                        const detailDiv = document.querySelector('#detail');
-                        if (detailDiv) {
-                            detailDiv.style.height = '800px';
-                            detailDiv.style.overflowY = 'visible';
-                        }
-                        document.body.style.zoom = '0.55';
-                    });
-
-                    const fullHeight = await popupOrder.evaluate(() => document.body.scrollHeight);
-                    await popupOrder.setViewportSize({ width: 1200, height: fullHeight });
-
-                    // create order PDF (Playwright's .pdf writes to disk)
-                    await popupOrder.pdf({
-                        path: orderPdfPath,
-                        format: 'A4',
-                        printBackground: true,
-                        scale: 1,
-                        preferCSSPageSize: true
-                    });
-
-
-                    await popupOrder.close();
-                }
+        await page.fill('#searchField', "GC19740");
+        // 1️⃣ Make #searchAll visible if it's hidden
+        await page.evaluate(() => {
+            const searchAll = document.querySelector('#searchAll');
+            if (searchAll) {
+                searchAll.style.display = 'block';
             }
+        });
+
+        // 2️⃣ Click the "All Facilities" row
+        await page.click('#searchAll tr:has-text("All Facilities")');
+
+
+        // CLICK that triggers popup is inside retrySubmitSearch,
+        // so wrap it in Promise.all
+        // Press Enter to trigger search → popup opens
+        const [globalPopup] = await Promise.all([
+            page.waitForEvent('popup', { timeout: 15000 }),
+            page.press('#searchField', 'Enter')   // replaces retrySubmitSearch(page)
+        ]);
+        await globalPopup.waitForLoadState('domcontentloaded');
+
+        await globalPopup.waitForSelector('table.pccTableShowDivider', { timeout: 10000 });
+
+        // Click the correct resident link by ResidentID match
+        const selector = `a:has-text("(GC19740)")`;
+        await globalPopup.waitForSelector(selector, { timeout: 5000  });
+
+        // Try clicking and wait up to 4 seconds for popup to close
+        try {
+            await Promise.race([
+                globalPopup.click(selector),
+                (async () => { await new Promise(r => setTimeout(r, 4000)); })()
+            ]);
+        } catch (err) {
+            console.log("Click failed or timed out:", err);
         }
+
+        // // Force close if still not closed
+        // if (!globalPopup.isClosed()) {
+        //     await globalPopup.close();
+        // }
+        // var ResidentID = "GC19740"
+        // // 6️⃣ Enter search value
+        // await page.fill('#searchField', ResidentID);
+
+        // // Press Enter and wait for the search results to load
+        // await Promise.all([
+        //     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => { }), // catches if SPA navigation doesn't occur
+        //     page.keyboard.press('Enter')
+        // ]);
+
+
+        // await page.click('a[href*="labResults.xhtml"]');
+
+        // await page.waitForSelector('#filterTrigger', { state: 'visible', timeout: 30000 });
+
+        // // 3️⃣ Expand "Display Filters" if not already expanded
+        // const filterImg = await page.$('#filterTrigger img.plussign_img');
+        // const src = await filterImg.getAttribute('src');
+
+        // if (src.includes('newplus.gif')) {
+        //     // Only click if filters are collapsed
+        //     await page.click('#filterTrigger');
+        //     // Wait for the image to change to minus
+        //     await page.waitForFunction(() => {
+        //         const img = document.querySelector('#filterTrigger img.plussign_img');
+        //         return img && img.src.includes('newminus.gif');
+        //     }, { timeout: 10000 });
+        // }
+
+        // // 4️⃣ Clear the date fields
+        // await page.fill('#reported_date_dummy', '');
+        // await page.fill('#collection_date_dummy', '');
+
+        // // 5️⃣ Click the Search button
+        // await Promise.all([
+        //     page.waitForLoadState('networkidle'), // wait until search results load
+        //     page.click('#refreshButtonId')
+        // ]);
+
+
+        // console.log('✅ Logged in and entered search value successfully.');
+        // const rows = await page.$$('#resultsTable tbody tr');
+        // var cleanDate = "9/23/2025"
+
+        // for (const row of rows) {
+        //     const ts = Date.now();
+        //     const collectionDate = await row.$eval('td:nth-child(6) span', el => el.textContent.trim());
+        //     if (collectionDate.includes("9/23/2025")) {
+
+        //         const resultPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Result_${cleanDate}_${ts}.pdf`);
+        //         const orderPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Order_${cleanDate}_${ts}.pdf`);
+        //         const mergedPdfPath = path.join(baseDir, `${facilityName}_${ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
+        //         const actionsMenu = await row.$('a.pccActionMenu');
+        //         await actionsMenu.click();
+        //         const viewResults = await row.$('li:has-text("View Results")');
+        //         const [popup] = await Promise.all([page.waitForEvent('popup'), viewResults.click()]);
+        //         await popup.waitForLoadState('domcontentloaded');
+
+        //         const viewFileBtn = await popup.$('#viewFileButton');
+        //         if (viewFileBtn) {
+
+        //             const [pdfPopup] = await Promise.all([
+        //                 popup.context().waitForEvent('page'),
+        //                 viewFileBtn.click()
+        //             ]);
+        //             await pdfPopup.waitForLoadState('domcontentloaded');
+        //             const pdfUrl = pdfPopup.url();
+
+        //             // request and check content-type
+        //             const pdfResponse = await page.request.get(pdfUrl);
+        //             const contentType = (pdfResponse.headers()['content-type'] || '').toLowerCase();
+        //             if (contentType.includes('application/pdf')) {
+        //                 fs.writeFileSync(resultPdfPath, await pdfResponse.body());
+
+
+        //             }
+        //             await pdfPopup.close();
+        //         }
+        //         await popup.close();
+
+        //         // --- VIEW ORDER POPUP ---
+        //         const actionsMenuOrder = await row.$('a.pccActionMenu');
+        //         await actionsMenuOrder.click();
+        //         const viewOrder = await row.$('li:has-text("View Order")');
+        //         if (viewOrder) {
+        //             const [popupOrder] = await Promise.all([page.waitForEvent('popup'), viewOrder.click()]);
+        //             await popupOrder.waitForLoadState('domcontentloaded');
+
+        //             await popupOrder.evaluate(() => {
+        //                 const detailDiv = document.querySelector('#detail');
+        //                 if (detailDiv) {
+        //                     detailDiv.style.height = '800px';
+        //                     detailDiv.style.overflowY = 'visible';
+        //                 }
+        //                 document.body.style.zoom = '0.55';
+        //             });
+
+        //             const fullHeight = await popupOrder.evaluate(() => document.body.scrollHeight);
+        //             await popupOrder.setViewportSize({ width: 1200, height: fullHeight });
+
+        //             // create order PDF (Playwright's .pdf writes to disk)
+        //             await popupOrder.pdf({
+        //                 path: orderPdfPath,
+        //                 format: 'A4',
+        //                 printBackground: true,
+        //                 scale: 1,
+        //                 preferCSSPageSize: true
+        //             });
+
+
+        //             await popupOrder.close();
+        //         }
+        //     }
+        // }
     } catch (err) {
         console.error('❌ Script failed:', err.message);
     } finally {

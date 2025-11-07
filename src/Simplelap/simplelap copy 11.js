@@ -14,7 +14,7 @@ if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
 const patientSchema = new mongoose.Schema({
     ResidentID: String,
     dos: String,
-    GroupClient: String,
+    GroupClient:String,
     Client: String,
     status: { type: String, default: 'Pending' },
     logs: [String],
@@ -191,7 +191,7 @@ async function downloadResultPdf(page, row, patient, resultPdfPath) {
         await popup.close();
 
         await Patient.updateOne({ _id: patient._id }, {
-            $set: { status: "success", message: "Result PDF saved", resultPdfs: resultPdfPath }
+            $set: { status: "success", message: "Result PDF saved", resultPdfs : resultPdfPath }
         });
 
     } catch (err) {
@@ -255,8 +255,8 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
         }
 
         // Clean up temporary PDFs
-        try { fs.existsSync(resultPdfPath) && fs.unlinkSync(resultPdfPath); } catch { }
-        try { fs.existsSync(orderPdfPath) && fs.unlinkSync(orderPdfPath); } catch { }
+        try { fs.existsSync(resultPdfPath) && fs.unlinkSync(resultPdfPath); } catch {}
+        try { fs.existsSync(orderPdfPath) && fs.unlinkSync(orderPdfPath); } catch {}
 
     } catch (err) {
         console.error(`❌ Order PDF error: ${err.message}`);
@@ -272,46 +272,26 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
     await mongoose.connect(MONGO_URI);
     console.log("✅ Connected to MongoDB");
 
-    const GroupByClients = await Patient.aggregate(
-        [
-            { $match: { status: "Pending" } },
-            {
-                $addFields: {
-                    MainGroupClient: {
-                        $arrayElemAt: [
-                            { $split: ["$GroupClient", " "] },
-                            0
-                        ]
-                    }
-                }
-            },
-            {
-                $sort: {
-                    MainGroupClient: 1,   // Sort by the extracted common client name
-                    ResidentId: 1         // Optional (sort inside group)
-                }
-            },
-            {
-                $group: {
-                    _id: "$MainGroupClient",
-                    count: { $sum: 1 },
-                    clients: { $addToSet: "$Client" },
-                    docs: { $push: "$$ROOT" }
-                }
-            },
-
-            { $sort: { count: -1 } },
-            {
-                $project: {
-                    _id: 0,
-                    GroupClient: "$_id",
-                    count: 1,
-                    clients: 1,
-                    docs: 1
-                }
+    const GroupByClients = await Patient.aggregate([
+        {
+            $match: { status: "Pending" }
+        },
+        {
+            $group: {
+                _id: {
+                    GroupClient: "$GroupClient",         // Group by Client
+                    ResidentId: "$ResidentId"  // and ResidentId
+                },
+                count: { $sum: 1 },          // Count documents per (Client + ResidentId)
+                docs: { $push: "$$ROOT" }    // Push full documents into an array
             }
-        ]
-    );
+        },
+        {
+            $sort: {
+                "count": -1,
+            }
+        }
+    ]);
 
     if (GroupByClients.length === 0) {
         console.log('No Pending patients found in database.');
@@ -326,12 +306,12 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
     try {
         for (const GetLocation of GroupByClients) {
             const count = GetLocation.count;
-            const Client = GetLocation.GroupClient;
-            console.info("User Name:", Client, "| Pending:", count);
+            const facilityName = GetLocation._id.GroupClient;
+            console.info("🏥 Facility:", facilityName, "| Pending:", count);
 
-            const GetLogin = await Login.findOne({ Client });
+            const GetLogin = await Login.findOne({Client:facilityName});
             if (!GetLogin) {
-                console.error(`❌ No login credentials found for ${Client}`);
+                console.error(`❌ No login credentials found for ${facilityName}`);
                 continue;
             }
 
@@ -351,6 +331,9 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
 
             // --- MANUAL LOGIN REQUIRED (MFA Compatible) ---
             console.log("\n🔑 *** MANUAL LOGIN REQUIRED ***");
+            console.log("1) Login to PCC manually.");
+            console.log("2) Complete MFA if prompted.");
+            console.log("3) Once dashboard loads, script will continue automatically.\n");
 
             await page.goto('https://www30.pointclickcare.com/home/login.jsp', { timeout: 60000 });
             await page.fill('[name="un"]', GetLogin.UserName);
@@ -366,22 +349,24 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                 await mongoose.disconnect();
                 process.exit();
             }
+
+            // 🔔 Beep sound to alert login success
+            process.stdout.write('\x07');
+
             console.log("✅ Login successful! Continuing...\n");
 
 
-            // for (const facilityName of GetLocation.clients) {
+            await page.waitForSelector('#pccFacLink', { state: 'visible', timeout: 60000 });
+            console.log('✅ Dashboard loaded successfully.');
 
-            //     await page.waitForSelector('#pccFacLink', { state: 'visible', timeout: 60000 });
-            //     console.log('✅ Dashboard loaded successfully.');
+            await retryClick(page, '#pccFacLink');
+            await page.waitForTimeout(5000);
 
-            //     await retryClick(page, '#pccFacLink');
-            //     await page.waitForTimeout(5000);
-
-            //     const selected = await selectFacilityWithRetry(page, facilityName);
-            //     if (!selected) {
-            //         console.error(`🚫 Skipping facility: ${facilityName}`);
-            //         continue;
-            //     }
+            const selected = await selectFacilityWithRetry(page, facilityName);
+            if (!selected) {
+                console.error(`🚫 Skipping facility: ${facilityName}`);
+                continue;
+            }
 
             await page.waitForSelector('#searchField', { state: 'visible', timeout: 60000 });
             await page.waitForTimeout(3000);
@@ -394,59 +379,9 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
 
                     if (lastResident !== patient.ResidentID) {
                         lastResident = patient.ResidentID;
-
-
                         await page.fill('#searchField', patient.ResidentID);
-                        // 1️⃣ Make #searchAll visible if it's hidden
-                        await page.evaluate(() => {
-                            const searchAll = document.querySelector('#searchAll');
-                            if (searchAll) {
-                                searchAll.style.display = 'block';
-                            }
-                        });
-
-                        // 2️⃣ Click the "All Facilities" row
-                        await page.click('#searchAll tr:has-text("All Facilities")');
-
-
-                        // CLICK that triggers popup is inside retrySubmitSearch,
-                        // so wrap it in Promise.all
-                        // Press Enter to trigger search → popup opens
-                        const [globalPopup] = await Promise.all([
-                            page.waitForEvent('popup', { timeout: 15000 }),
-                            page.press('#searchField', 'Enter')   // replaces retrySubmitSearch(page)
-                        ]);
-                        await globalPopup.waitForLoadState('domcontentloaded');
-
-                        await globalPopup.waitForSelector('table.pccTableShowDivider', { timeout: 10000 });
-
-                        // Click the correct resident link by ResidentID match
-                        const selector = `a:has-text("(${patient.ResidentID})")`;
-                        await globalPopup.waitForSelector(selector, { timeout: 5000 });
-
-                        // Try clicking and wait up to 4 seconds for popup to close
-                        try {
-                            await Promise.race([
-                                globalPopup.click(selector),
-                                (async () => { await new Promise(r => setTimeout(r, 4000)); })()
-                            ]);
-                        } catch (err) {
-                            console.log("Click failed or timed out:", err);
-                        }
-
-                        // 5) Ensure popup is closed (failsafe)
-                        // try {
-                        //     await globalPopup.close();
-                        // } catch { }
-
-                        // // 6) Wait until main page loads the resident’s page
-                        // await page.waitForLoadState('networkidle', { timeout: 20000 });
-                        // console.log("✅ Resident profile loaded");
-
-                        // lastResident = patient.ResidentID;
-                        // await page.fill('#searchField', patient.ResidentID);
-                        // await retrySubmitSearch(page);
-                        // await page.waitForTimeout(3000);
+                        await retrySubmitSearch(page);
+                        await page.waitForTimeout(3000);
 
                         try {
                             await page.waitForSelector('a[href*="labResults.xhtml"]', { state: 'visible', timeout: 10000 });
@@ -543,9 +478,9 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
 
                             const cleanDate = collectionDate.replace(/[/: ]/g, '_');
                             const ts = Date.now();
-                            const resultPdfPath = path.join(baseDir, `${Client}_${patient.ResidentID}_Result_${cleanDate}_${ts}.pdf`);
-                            const orderPdfPath = path.join(baseDir, `${Client}_${patient.ResidentID}_Order_${cleanDate}_${ts}.pdf`);
-                            const mergedPdfPath = path.join(baseDir, `${Client}_${patient.ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
+                            const resultPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Result_${cleanDate}_${ts}.pdf`);
+                            const orderPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Order_${cleanDate}_${ts}.pdf`);
+                            const mergedPdfPath = path.join(baseDir, `${facilityName}_${patient.ResidentID}_Merged_${cleanDate}_${ts}.pdf`);
 
                             // ---------- RESULT PDF ----------
                             await retryAsync(() => downloadResultPdf(page, row, patient, resultPdfPath), 3, 5000);
@@ -573,7 +508,6 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                         $set: { status: "Failed", message: `Error: ${err.message}` }
                     });
                 }
-                //}
             }
         }
 

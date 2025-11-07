@@ -68,7 +68,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
         await client.connect();
         const database = client.db('amammh');
         const patientsCollection = database.collection('mmhmanual');
-        var CurrentDate = moment().format("MMDDYYYY")
+        
         const patientsCursor = patientsCollection.find({
             Ready: "Pending",
         });
@@ -224,8 +224,8 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                     page.waitForEvent('filechooser'),
                     page.locator('#modalPatientDocs #patientdocsBtn4').click(),
                 ]);
-
-                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\manual\\${patient.FileName}`
+               
+                var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\manual\\${patient.FileName}.pdf`
                 await fileChooser.setFiles(filesToUpload);
 
                 const closeModal = async (modalSelector, closeBtnSelector, modalName) => {
@@ -233,7 +233,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                     await modal.waitFor({ state: 'visible' });
                     await modal.locator(closeBtnSelector).first().click();
                     try {
-                        await modal.waitFor({ state: 'hidden', timeout: 3000 });
+                        await modal.waitFor({ state: 'hidden', timeout: 3000 })
                         console.log(`${modalName} closed successfully`);
                     } catch {
                         console.log(`${modalName} is still visible`);
