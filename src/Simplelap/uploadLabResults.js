@@ -8,6 +8,7 @@ const moment = require('moment');
 const MONGO_URI = 'mongodb://localhost:27017/pcc_labdata';
 const baseDir = path.join(__dirname, 'pdf_output');
 if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
+const baseDirUpload = 'F:\\playwright-projects\\src\\Simplelap\\pdf_output';
 
 const currentYear = new Date().getFullYear();
 const startYear = 2023;
@@ -26,6 +27,7 @@ const patientSchema = new mongoose.Schema({
     status: { type: String, default: 'Pending' },
     logs: [String],
     disputeId: String,
+    disputeIdFound: String,
     Message: String,
     files: {
         resultPdf: String,
@@ -70,15 +72,17 @@ async function closeReconsiderationModal(page) {
     const patients = await Patient.aggregate([
         {
             $match: {
-                status: "completed",
-                Classification: "MISSING MEDICAL RECORDS"
+                status: "success",
+                Classification: { $in: ["LACK OF PRE-AUTHORIZATION", "MISSING MEDICAL RECORDS"] },
+                dosMatchedCount: { $in: [2] },
+                disputeId: null
             }
         },
         {
             $group: {
                 _id: {
                     memberId: "$Member ID#",
-                    dos: "$dos"
+                    DOB: "$DOB"
                 },
                 records: { $push: "$$ROOT" }
             }
@@ -87,7 +91,7 @@ async function closeReconsiderationModal(page) {
     for (const memberGroup of patients) {
 
         const memberId = String(memberGroup._id.memberId);
-        const dob = memberGroup._id.dob;
+        const dob = memberGroup._id.DOB;
 
         const records = memberGroup.records;
 
@@ -112,21 +116,136 @@ async function closeReconsiderationModal(page) {
         await page.locator('li', { hasText: 'View Eligibility & Patient Information' }).click();
 
 
-        const [newPage] = await Promise.all([
-            context.waitForEvent('page'),
-            page.click('[data-testid="submitBtn"]')
-        ]);
-        // ✅ Check if "No Patients..." message appears
-        const noPatientFound = await newPage.locator('span[data-testid="NoPatientInfoFoundMessage"]').isVisible({ timeout: 5000 }).catch(() => false);
+        // let newPage;
+        // try {
+        //     const [popup] = await Promise.all([
+        //         // Wait *briefly* for new page — but don't block forever
+        //         context.waitForEvent('page', { timeout: 5000 }).catch(() => null),
+        //         page.click('[data-testid="submitBtn"]')
+        //     ]);
 
-        if (noPatientFound) {
+        //     newPage = popup; // may be null if no new tab opened
+        // } catch (err) {
+        //     console.error("❌ Error clicking submit:", err.message);
+        //     continue;
+        // }
+        // // Check if "No Patients..." message appears
+        // let noPatientFound = await page
+        //     .locator('span[data-testid="NoPatientInfoFoundMessage"]')
+        //     .isVisible({ timeout: 5000 })
+        //     .catch(() => false);
+
+        // // 🔁 If not found in IL Medicaid, retry with IL MMP Medicaid
+        // if (noPatientFound) {
+        //     console.log('⚠️ No Patients found under IL Medicaid — trying IL MMP Medicaid...');
+
+        //     await page.selectOption('#providerProfileName', { label: 'IL MMP Medicaid' });
+        //     await Promise.all([
+        //         page.waitForNavigation({ waitUntil: 'load' }),
+        //         page.click('#medicalDropdownSubmitID')
+        //     ]);
+
+        //     await page.fill('#member-id', memberId);
+        //     await page.type('#tDatePicker', moment(dob, 'M/D/YYYY').format("MMDDYYYY"));
+
+        //     await page.waitForSelector('#action-type', { state: 'visible' });
+        //     await page.click('#action-type');
+        //     await page.waitForSelector('ul[role="listbox"]', { state: 'visible' });
+        //     await page.locator('li', { hasText: 'View Eligibility & Patient Information' }).click();
+
+        //     const [retryPage] = await Promise.all([
+        //         context.waitForEvent('page'),
+        //         page.click('[data-testid="submitBtn"]')
+        //     ]);
+
+        //     // ✅ Recheck for "No Patients..." message again (separate check)
+        //     noPatientFound = await page
+        //         .locator('span[data-testid="NoPatientInfoFoundMessage"]')
+        //         .isVisible({ timeout: 5000 })
+        //         .catch(() => false);
+
+        //     if (noPatientFound) {
+        //         await Patient.updateMany(
+        //             { "Member ID#": memberId, DOB: dob },
+        //             { $set: { Message: "No Patients found — skipping this record", status: "completed" } }
+        //         );
+        //         console.log('⚠️ No Patients found under both Medicaid plans — skipping this record');
+        //         continue;
+        //     }
+
+        //     // If found in IL MMP Medicaid, use retryPage going forward
+        //     newPage = retryPage;
+        // }
+        let newPage;
+        const plans = [
+            "IL Medicaid",
+            "IL MMP Medicaid",
+            "IL MMP Medicare",
+            "IL MMP Behavioral Health"
+        ];
+
+        let patientFound = false;
+
+        for (const plan of plans) {
+            try {
+                console.log(`🩺 Checking for patients under: ${plan}`);
+
+                // Select the provider plan
+                await page.selectOption('#providerProfileName', { label: plan });
+                await Promise.all([
+                    page.waitForNavigation({ waitUntil: 'load' }),
+                    page.click('#medicalDropdownSubmitID')
+                ]);
+
+                // Fill member ID and DOB again for each plan
+                await page.fill('#member-id', memberId);
+                await page.fill('#tDatePicker', moment(dob, 'M/D/YYYY').format("MMDDYYYY"));
+
+                // Select "View Eligibility & Patient Information"
+                await page.waitForSelector('#action-type', { state: 'visible' });
+                await page.click('#action-type');
+                await page.waitForSelector('ul[role="listbox"]', { state: 'visible' });
+                await page.locator('li', { hasText: 'View Eligibility & Patient Information' }).click();
+
+                // Click submit and check if a new page opened
+                const [popup] = await Promise.all([
+                    context.waitForEvent('page', { timeout: 5000 }).catch(() => null),
+                    page.click('[data-testid="submitBtn"]')
+                ]);
+
+                newPage = popup; // may be null if no popup opened
+
+                // Check for "No Patients found" message
+                const noPatientFound = await page
+                    .locator('span[data-testid="NoPatientInfoFoundMessage"]')
+                    .isVisible({ timeout: 5000 })
+                    .catch(() => false);
+
+                if (!noPatientFound) {
+                    console.log(`✅ Patient found under ${plan}`);
+                    patientFound = true;
+                    break; // exit loop and proceed
+                } else {
+                    console.log(`⚠️ No Patients found under ${plan} — trying next plan...`);
+                }
+
+            } catch (err) {
+                console.error(`❌ Error checking ${plan}:`, err.message);
+                continue;
+            }
+        }
+
+        // 🔚 After all plans checked
+        if (!patientFound) {
             await Patient.updateMany(
                 { "Member ID#": memberId, DOB: dob },
-                { $set: { Message: "No Patients found — skipping this record", status: "completed" } }
+                { $set: { Message: "No Patients found under any plan — skipping this record", status: "completed" } }
             );
-            console.log('⚠️ No Patients found — skipping this record');
+            console.log('🚫 No Patients found under any of the four plans — skipping record');
             continue;
         }
+        // ✅ Proceed with next steps using newPage
+        console.log(`➡️ Proceeding with page for found patient...`);
         await newPage.waitForLoadState('domcontentloaded');
 
         // Go to Claims
@@ -146,13 +265,23 @@ async function closeReconsiderationModal(page) {
                 await newPage.waitForLoadState('networkidle');
 
                 // Find matching DOS
-                const targetDos = date.format("MM/DD/YYYY");
+                const targetDos = date.format("MM/DD/YYYY");  // e.g. "06/09/2025"
+                const totalClaimBalance = patient['Total Claim Charges'];            // from patient['Total Claim Charges ']
+
                 const claimRow = await newPage.locator('table#claim tbody tr').filter({
-                    has: newPage.locator(`td:has-text("${targetDos}")`)
+                    has: newPage.locator('td', { hasText: new RegExp(targetDos.replace(/\//g, '\\/')) }),
+                    has: newPage.locator('td', { hasText: new RegExp(`\\${totalClaimBalance}`) }),
+                    hasNot: newPage.locator('td', { hasText: /Paid/i })   // exclude Paid rows
                 }).first();
 
+                await newPage.waitForTimeout(2000)
                 if ((await claimRow.count()) === 0) {
+
                     console.log(`⚠️ No claim found for DOS ${targetDos}`);
+                    await Patient.updateOne(
+                        { _id: patient._id },
+                        { $set: { Message: "Claim Already Paid", status: "Failed" } }
+                    );
                     if (!newPage.isClosed()) await newPage.close();
                     continue;
                 }
@@ -163,7 +292,7 @@ async function closeReconsiderationModal(page) {
                     claimLink.click()
                 ]);
 
-                console.log(`✅ Claim page for ${targetDos} loaded`);
+                console.log(`✅ Claim page for ${targetDos} loaded ${totalClaimBalance}`);
 
                 // Click Dispute Claim
                 await newPage.click('a.dispute-claim');
@@ -192,10 +321,56 @@ async function closeReconsiderationModal(page) {
                 await newPage.selectOption('#reconsideration-type', { value: 'Audit_Medical_Records_Requested' });
                 await newPage.fill('#reconsideration-notes', 'ATTACHED ARE THE REQUEST OF MEDICAL RECORDS');
 
-                const filePath = patient.files.mergedPdf || patient.files.resultPdf;
-                console.log("filePath", filePath)
-                await newPage.setInputFiles('#files', filePath);
+                // const filePath = patient.mergedPdfs || patient.resultPdfs;
+                // console.log("filePath", filePath)
+                // await newPage.setInputFiles('#files', filePath);
 
+                // Clean date used in your naming logic
+                // Build common prefix (everything before timestamp)
+                const filePrefix = `${patient.GroupClient}_${patient.ResidentID}_`;
+
+                // Build regex to match your 3 file types with timestamp
+                const regex = new RegExp(`^${filePrefix}(Merged|Result)_${moment(patient.dos, "M/D/YYYY").format("M_D_YYYY")}_.+\\.pdf$`, 'i');
+                //console.log("regex",regex)
+                //const sample = fs.readdirSync(baseDirUpload)
+                //console.log("sample",JSON.stringify(sample))
+                // Read all matching PDFs in the directory
+                const matchingFiles = fs.readdirSync(baseDirUpload)
+                    .filter(file => regex.test(file))
+                    .map(file => path.join(baseDirUpload, file));
+
+                console.log("Matching Files Length", matchingFiles.length, matchingFiles);
+
+                if (matchingFiles.length === 0) {
+                    console.log("⚠️ No matching PDF files found for upload");
+                } else {
+                    const seenGroups = new Set();
+                    const uniqueFiles = [];
+
+                    for (const filePath of matchingFiles) {
+                        const fileName = path.basename(filePath);
+
+                        // Extract pattern parts: (Merged|Result)_8_22_2025_13_42_1762855809625.pdf
+                        const match = fileName.match(/(Merged|Result)_(\d+)_(\d+)_(\d+)_(\d+)_(\d+)_\d+\.pdf$/);
+
+                        if (match) {
+                            const [_, type, month, day, year, hour, minute] = match;
+                            const groupKey = `${type}_${month}_${day}_${year}_${hour}_${minute}`;
+
+                            if (!seenGroups.has(groupKey)) {
+                                seenGroups.add(groupKey);
+                                uniqueFiles.push(filePath);
+                            }
+                        } else {
+                            console.log("⚠️ Skipped unmatched file:", fileName);
+                        }
+                    }
+
+                    console.log("📄 Final unique PDFs (1 per hour–minute group):", uniqueFiles);
+
+                    // ✅ Upload unique files
+                    await newPage.setInputFiles('#files', uniqueFiles);
+                }
                 const checked = await newPage.isChecked('#include-email-updates');
                 if (!checked) await newPage.check('#include-email-updates');
 
@@ -210,22 +385,29 @@ async function closeReconsiderationModal(page) {
 
                 if (match) {
                     const disputeId = match[1];
-                    await Patient.updateOne({ _id: patient._id }, { $set: { disputeId } });
+                    console.log("disputeId", disputeId)
+                    await Patient.updateOne({ _id: patient._id }, { $set: { disputeId, disputeIdFound: "Found" } });
                     console.log(`🎉 Dispute Submitted: ${disputeId}`);
                 } else {
-                    await Patient.updateOne({ _id: patient._id }, { $set: { disputeId: "", status: "NoDisputeID" } });
+                    await Patient.updateOne({ _id: patient._id }, { $set: { disputeId: null, disputeIdFound: successMessage } });
                     console.log('⚠️ No Dispute ID found');
                 }
+                await newPage.goto('https://provider.ilmeridian.com/careconnect/memberDetails/claims', { waitUntil: 'networkidle' });
+                await newPage.waitForTimeout(2000); // give 2s buffer
+                // // Wait for the "Back to Member Details" button to appear
+                // await newPage.waitForSelector('a[href="/careconnect/memberDetails/claims"].btn', { state: 'visible', timeout: 5000 });
 
-                // Wait for the "Back to Member Details" button to appear
-                await newPage.waitForSelector('a[href="/careconnect/memberDetails/claims"].btn', { state: 'visible', timeout: 5000 });
+                // // Click the button and wait for the page to reload
+                // await Promise.all([
+                //     newPage.waitForNavigation({ waitUntil: 'networkidle' }),
+                //     newPage.click('a[href="/careconnect/memberDetails/claims"].btn')
+                // ]);
+                // const backButton = await newPage.waitForSelector('//a[contains(text(), "Back to Claims")]', { timeout: 8000 });
 
-                // Click the button and wait for the page to reload
-                await Promise.all([
-                    newPage.waitForNavigation({ waitUntil: 'networkidle' }),
-                    newPage.click('a[href="/careconnect/memberDetails/claims"].btn')
-                ]);
-
+                // await Promise.all([
+                //     newPage.waitForNavigation({ waitUntil: 'networkidle' }),
+                //     backButton.click()
+                // ]);
             } catch (err) {
                 console.error(`❌ Error for ${patient.ResidentID}:`, err.message);
             }

@@ -25,10 +25,10 @@ const transporter = nodemailer.createTransport({
 // ✅ Helper: Send completion email
 async function sendCompletionMail(totalPatients, successCount, failCount, startTime, endTime, excelPath) {
     const mailOptions = {
-        from: '"SCIO Automation Hospital Records" <trackar@scioms.com>',
+        from: '"SCIO Automation Patient Documents" <trackar@scioms.com>',
         to: ['sudha@scioms.com',"nshree@scioms.com"],
         cc: ['mnavaladi@scioms.com', 'jganesh@scioms.com',"rathi@scioms.com"],
-        subject: `Hospital Records and Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
+        subject: `Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
         html: `
             <h2>Automation Run Summary</h2>
             <p><b>Total Patients:</b> ${totalPatients}</p>
@@ -71,13 +71,13 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
         await client.connect();
         const database = client.db('scyotools');
         const patientsCollection = database.collection('mmh');
-        var CurrentDate = "12032025"
+        var CurrentDate = "12042025"
         const patientsCursor = patientsCollection.find({
             Ready: null,
             "Bot Status": "Success",
             //CurrentDate: CurrentDate,
             FilePath:{$regex:CurrentDate,$options:"i"},
-            Practice: "Hospital records"
+            Practice: "Patient Documents"
         });
         const patients = await patientsCursor.toArray();
 

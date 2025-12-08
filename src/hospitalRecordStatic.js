@@ -27,7 +27,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
     const mailOptions = {
         from: '"SCIO Automation Hospital Records" <trackar@scioms.com>',
         to: ["nshree@scioms.com"],
-        cc: ['sudha@scioms.com', 'jganesh@scioms.com',"rathi@scioms.com","mnavaladi@scioms.com"],
+        cc: ['sudha@scioms.com', 'jganesh@scioms.com', "rathi@scioms.com", "mnavaladi@scioms.com"],
         subject: `Hospital Records and Patient Document Running Report ${moment().format("MM/DD/YYYY")}`,
         html: `
             <h2>Automation Run Summary</h2>
@@ -68,7 +68,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
         await client.connect();
         const database = client.db('amammh');
         const patientsCollection = database.collection('mmhmanual');
-        
+
         const patientsCursor = patientsCollection.find({
             Ready: "Pending",
         });
@@ -143,18 +143,67 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
             await sendCompletionMail("Login Attempt Failed", 0, 0, startTime, endTime, null);
             console.log('❌ Could not confirm login — please check CAPTCHA or credentials.');
         }
+        // SAFE modal closer (auto-detect + skip if not exist)
+        const closeModalSafe = async (modalSelector, closeBtnSelector, modalName) => {
+            const modal = page.locator(modalSelector);
+
+            // Check if modal exists in DOM
+            const modalCount = await modal.count();
+            if (modalCount === 0) {
+                console.log(`${modalName} not found, skipping`);
+                return;
+            }
+
+            // Check if modal is visible
+            const visible = await modal.isVisible();
+            if (!visible) {
+                console.log(`${modalName} found but not visible, skipping`);
+                return;
+            }
+
+            // Try clicking close button
+            const closeBtn = modal.locator(closeBtnSelector).first();
+
+            if (await closeBtn.count() === 0) {
+                console.log(`Close button not found for ${modalName}, skipping`);
+                return;
+            }
+
+            try {
+                await closeBtn.click({ timeout: 3000 });
+                await modal.waitFor({ state: 'hidden', timeout: 3000 });
+                console.log(`${modalName} closed successfully`);
+            } catch (err) {
+                console.log(`Failed to close ${modalName}: ${err.message}`);
+            }
+        };
+        const autoCloseAllModals = async () => {
+            const selectors = [
+                '#documentReferal',
+                '#modalPatientDocs',
+                '#patient_hub',
+                '.modal.show',
+                '.modal.fade.show'
+            ];
+
+            for (let s of selectors) {
+                try {
+                    await closeModalSafe(s, '.modal-header button, #savePrompt-tplBtn1, #patient-hubBtn1', s);
+                } catch { }
+            }
+        };
         for (const patient of patients) {
             let status = 'Pending';
             let errorMsg = '';
             try {
 
-                console.log(`\nProcessing patient: ${patient['Patient name']}, ${patient['DOB']}`);
+                console.log(`\nProcessing patient: ${patient['Patient Name']}, ${patient['DOB']} , ${patient['DOS']}`);
 
                 await page.locator('#jellybean-panelLink65').click();
                 await page.waitForSelector('#searchText', { state: 'visible' });
 
-                // Get patient name
-                const fullName = patient['Patient name'].trim();
+                // Get Patient Name
+                const fullName = patient['Patient Name'].trim();
                 let shortName = '';
 
                 // Check if the name contains a comma
@@ -191,6 +240,13 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                 if (rowCount === 0) {
                     failCount++;
 
+                    processedRecords.push({
+                        ...patient,
+                        Ready: "Failed",
+                        Status: "Failed",
+                        Error: "Patient Not Found"
+                    });
+
                     status = 'Failed';
                     errorMsg = 'Patient Not Found';
                     console.log("Patient Not Found")
@@ -224,7 +280,7 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                     page.waitForEvent('filechooser'),
                     page.locator('#modalPatientDocs #patientdocsBtn4').click(),
                 ]);
-               
+
                 var filesToUpload = `C:\\Users\\madhan.n\\OneDrive - SCIO Management Solutions (1)\\mmh\\manual\\${patient.FileName}.pdf`
                 await fileChooser.setFiles(filesToUpload);
 
@@ -239,10 +295,13 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                         console.log(`${modalName} is still visible`);
                     }
                 };
+                
+                //await closeModal('#documentReferal', '.modal-header >> #savePrompt-tplBtn1', 'Document Referral Modal');
+                await closeModalSafe('#modalPatientDocs', '.modal-header >> #savePrompt-tplBtn1', 'Patient Docs Modal');
+                await closeModalSafe('#patient_hub', '.modal-header >> #patient-hubBtn1', 'Patient Hub Modal');
 
-                await closeModal('#documentReferal', '.modal-header >> #savePrompt-tplBtn1', 'Document Referral Modal');
-                await closeModal('#modalPatientDocs', '.modal-header >> #savePrompt-tplBtn1', 'Patient Docs Modal');
-                await closeModal('#patient_hub', '.modal-header >> #patient-hubBtn1', 'Patient Hub Modal');
+                // As backup, ensure no modals remain
+                await autoCloseAllModals();
 
                 await patientsCollection.updateOne({ _id: patient._id }, {
                     $set: {
@@ -251,8 +310,16 @@ async function sendCompletionMail(totalPatients, successCount, failCount, startT
                 });
                 status = 'Done';
                 successCount++;
-                console.info(`Successfully processed ${patient['Patient name']}, ${patient['DOB']}`);
+                console.info(`Successfully processed ${patient['Patient Name']}, ${patient['DOB']}`);
             } catch (err) {
+
+                processedRecords.push({
+                    ...patient,
+                    Ready: "Failed",
+                    Status: "Failed",
+                    Error: err.message
+                });
+
                 await patientsCollection.updateOne({ _id: patient._id }, {
                     $set: {
                         Ready: 'Failed',

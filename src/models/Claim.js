@@ -23,6 +23,8 @@ const ClaimSchema = new mongoose.Schema({
   user: { type: String },
   icn: { type: String },
   process: { type: String, enum: ["active", "inactive"], default: "inactive" }
+},{
+  timestamps:true
 });
  
 module.exports = mongoose.model('claims', ClaimSchema);

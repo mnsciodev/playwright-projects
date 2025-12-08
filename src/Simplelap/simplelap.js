@@ -3,7 +3,10 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { PDFDocument } = require('pdf-lib');
+const XLSX = require('xlsx');
+const readline = require('readline');
 const mongoose = require('mongoose');
+const moment = require("moment");
 
 // ---------------------- CONFIG ---------------------- //
 const MONGO_URI = 'mongodb://localhost:27017/pcc_labdata'; // change as needed
@@ -12,6 +15,8 @@ if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
 
 // ---------------------- SCHEMAS ---------------------- //
 const patientSchema = new mongoose.Schema({
+    DOB:String,
+    Patient:String,
     ResidentID: String,
     dos: String,
     GroupClient: String,
@@ -29,10 +34,22 @@ const patientSchema = new mongoose.Schema({
             mergedPdfs: [String],
         }
     ],
+    "Member ID#": String,
     dosMatchedCount: { type: Number, default: 0 },
     message: String,
     statusOrder: String,
-    messageOrder: String
+    messageOrder: String,
+    Classification:String,
+    Payer:String,
+    "Claim#":String,
+    Company:String,
+    DOS:String,
+    "Acct#":String,
+    DOB:String,
+    "Total Claim Charges":String,
+    "Claim Balance":String,
+    "Trx Actual Balance":String,
+
 }, { timestamps: true });
 
 const Patient = mongoose.model('patients', patientSchema);
@@ -57,6 +74,53 @@ async function mergePdfs(resultsPdfPath, orderPdfPath, mergedPath) {
 
     const mergedBytes = await mergedPdf.save();
     fs.writeFileSync(mergedPath, mergedBytes);
+}
+async function askExcelFile() {
+    return new Promise((resolve) => {
+        const rl = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+
+        rl.question("📄 Please enter Excel (.xlsx) file path: ", (filePath) => {
+            rl.close();
+            resolve(filePath.trim());
+        });
+    });
+}
+async function importExcelToMongo(filePath) {
+    if (!fs.existsSync(filePath)) {
+        console.error("❌ Excel file not found:", filePath);
+        process.exit(1);
+    }
+
+    console.log("📥 Reading Excel:", filePath);
+
+     const workbook = XLSX.readFile(filePath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, {
+        raw: false,
+        dateNF: "yyyy/mm/dd"
+    });
+
+    console.log(`📊 ${rows.length} rows found.`);
+
+    const formatted = rows.map(r => ({
+        ResidentID: r.ResidentID || r.ResidentId || "",
+        dos: r.DOS ? moment(r.DOS, "YYYY/MM/DD").format("M/D/YYYY") : "",
+        GroupClient: r.GroupClient || "",
+        Client: r.Client || "",
+        status: "Pending",
+    }));
+    await Patient.deleteMany({
+        createdAt: {
+            $gte: moment().startOf("day").toDate(),
+            $lte: moment().endOf("day").toDate()
+        },
+    });
+
+    await Patient.insertMany(formatted);
+    console.log("✅ Excel data inserted into MongoDB!");
 }
 
 async function retrySubmitSearch(page, maxRetries = 3, delay = 1500) {
@@ -271,10 +335,28 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
 (async () => {
     await mongoose.connect(MONGO_URI);
     console.log("✅ Connected to MongoDB");
-
+    
+    // 🔹 Step 1: Ask user for Excel
+    const excelPath = await askExcelFile();
+    
+    if (excelPath) {
+        console.log("📄 Excel file detected — importing...");
+        await importExcelToMongo(excelPath);
+        console.log("✅ Excel import completed!");
+    } else {
+        console.log("⏭️ No Excel file entered — skipping Excel import.");
+    }
+    console.log("🚀 Starting automation...");
+    
     const GroupByClients = await Patient.aggregate(
         [
-            { $match: { status: "Pending" } },
+            { $match: {
+                createdAt: {
+                    $gte: moment().startOf("day").toDate(),
+                    $lte: moment().endOf("day").toDate()
+                },
+                status: {$nin : ["success","not-found","LoginFailed"]} } 
+            },
             {
                 $addFields: {
                     MainGroupClient: {
@@ -446,12 +528,26 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                         // lastResident = patient.ResidentID;
                         // await page.fill('#searchField', patient.ResidentID);
                         // await retrySubmitSearch(page);
-                        // await page.waitForTimeout(3000);
+                        await page.waitForTimeout(5000);
 
                         try {
                             await page.waitForSelector('a[href*="labResults.xhtml"]', { state: 'visible', timeout: 10000 });
                             await page.click('a[href*="labResults.xhtml"]');
                             console.log('✅ Navigated to lab results page.');
+
+                            // Wait for the page to load and check if the error page is displayed
+                            await page.waitForTimeout(3000); // Wait for any potential error page to load
+
+                            const errorPage = await page.evaluate(() => {
+                                const errorMessage = document.querySelector('h2')?.textContent;
+                                return errorMessage?.includes('An error occurred while loading the page');
+                            });
+
+                            if (errorPage) {
+                                console.warn("⚠️ Lab Results page failed to load, going back...");
+                                await page.goBack(); // Simulate going back to the previous page
+                                console.log("✅ Returned to the previous page.");
+                            }
                         } catch {
                             console.warn(`⚠️ Lab Results not found for ${patient.ResidentID}`);
                             await Patient.updateOne({ _id: patient._id }, {
@@ -560,12 +656,18 @@ async function downloadOrderPdf(page, row, patient, resultPdfPath, orderPdfPath,
                             });
                         }
                     }
+                    const UpdateData = {
+                        dosMatchedCount: matchedCount,
+                        ...(matchedCount === 0
+                            ? { status: "Failed", message: "No matching DOS found" }
+                            : {})
+                    };
 
-                    if (matchedCount === 0) {
-                        await Patient.updateOne({ _id: patient._id }, {
-                            $set: { status: "Failed", message: "No matching DOS found" }
-                        });
-                    }
+                    await Patient.updateOne(
+                        { _id: patient._id },
+                        { $set: UpdateData }
+                    );
+
 
                 } catch (err) {
                     console.error("❌ Patient processing error:", err.message);
