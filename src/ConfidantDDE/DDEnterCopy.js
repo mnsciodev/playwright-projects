@@ -16,7 +16,7 @@ const transporter = nodemailer.createTransport({
     auth: {
         user: "trackar@scioms.com",
         pass: "Qow22964"
-    }
+    }   
 });
 
 // ✅ Helper: Send completion email
@@ -54,7 +54,6 @@ const transporter = nodemailer.createTransport({
 //         console.error('❌ Failed to send completion email:', err);
 //     }
 // }
-
 // ✅ Helper: Create Excel report with two sheets
 function createExcelReport(allClaims, currentDateClaims) {
     const wb = XLSX.utils.book_new();

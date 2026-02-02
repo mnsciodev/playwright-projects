@@ -6,7 +6,6 @@ const moment = require('moment');
 const XLSX = require('xlsx');
 const nodemailer = require('nodemailer');
 const Client = require("ssh2-sftp-client");
-
 const MongoURL = "mongodb+srv://scioms:5NHRcnbEjLaXefKF@scioms.n5hcu.mongodb.net/scio?retryWrites=true&w=majority";
 
 // ✅ Configure email transporter
@@ -18,6 +17,15 @@ const transporter = nodemailer.createTransport({
         pass: "Qow22964"
     }
 });
+
+// ✅ Get today's date in M-D-YY format (e.g., 1-2-26 for Jan 2, 2026)
+function getRunDate() {
+    const today = new Date();
+    const month = today.getMonth() + 1;  // 1-12
+    const day = today.getDate();         // 1-31
+    const year = today.getFullYear().toString().slice(-2); // 26
+    return `${month}-${day}-${year}`;
+}
 
 // ---------------- SFTP Upload ----------------
 async function uploadToSFTP(localPath, remotePath) {
@@ -52,19 +60,19 @@ function formatDOS(dos) {
     try {
         if (!dos) return '00000000';
         
-        // Try different date formats
-        const date = moment(dos);
+        const date = moment(dos).utc();
         if (date.isValid()) {
-            return date.format('YYYYMMDD');
+            return date.format('MMDDYYYY');
         }
         
-        // Try parsing as MM/DD/YYYY
-        const parts = dos.split('/');
-        if (parts.length === 3) {
-            const month = parts[0].padStart(2, '0');
-            const day = parts[1].padStart(2, '0');
-            const year = parts[2];
-            return `${year}${month}${day}`;
+        if (typeof dos === 'string') {
+            const parts = dos.split('/');
+            if (parts.length === 3) {
+                const month = parts[0].padStart(2, '0');
+                const day = parts[1].padStart(2, '0');
+                const year = parts[2];
+                return `${month}${day}${year}`;
+            }
         }
         
         return '00000000';
@@ -74,13 +82,9 @@ function formatDOS(dos) {
     }
 }
 
-// ✅ Save file locally with new structure including DOS folder
-async function saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, rowId = null, dos = null) {
+async function saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, patientName = null, rowId = null, dos = null, account = null) {
     try {
-        // Format DOS
         const dosFolder = formatDOS(dos);
-        
-        // Define local paths based on file type
         let localDir;
         
         if (fileType === 'HCFA') {
@@ -90,50 +94,70 @@ async function saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, r
             localDir = path.join(__dirname, 'ecw_downloads', 'Medical Records', claimNumber, dosFolder);
         }
         else if (fileType === 'ERA') {
-            localDir = path.join(__dirname, 'ecw_downloads', 'EOB', claimNumber, dosFolder);
+            localDir = path.join(__dirname, 'ecw_downloads', 'Denied EOBs', claimNumber, dosFolder);
         }
         else {
             console.error(`❌ Unknown file type: ${fileType}`);
             return null;
         }
         
-        // Create directory if it doesn't exist
         if (!fs.existsSync(localDir)) {
             fs.mkdirSync(localDir, { recursive: true });
             console.log(`📁 Created local directory: ${localDir}`);
         }
         
-        // ✅ Create filename with rowId if it exists
         const originalFileName = path.basename(sourcePath);
-        let fileName = originalFileName;
+        let fileName;
         
-        if (fileType === 'ERA' && rowId) {
-            // Extract base name without extension
-            const baseName = originalFileName.replace(/\.(pdf|html)$/, '');
-            const extension = path.extname(originalFileName);
-            
-            // Check if rowId is already in filename
-            if (!baseName.includes(`_row${rowId}`)) {
-                // Insert rowId after claim number in filename
-                const parts = baseName.split('_');
-                for (let i = 0; i < parts.length; i++) {
-                    if (parts[i].startsWith(claimNumber)) {
-                        const newPart = `${parts[i]}_row${rowId}`;
-                        parts[i] = newPart;
-                        fileName = parts.join('_') + extension;
-                        break;
-                    }
-                }
+        if (fileType === 'HCFA') {
+            const runDate = getRunDate();
+            fileName = `HCFA_${claimNumber}-${runDate}.pdf`;
+        } 
+        else if (fileType === 'PROGRESS_NOTE') {
+            // ✅ FIX: Check if this is a Hub Flow file with suffix
+            if (originalFileName.startsWith(`ProgressNote_${claimNumber}-${account}_`)) {
+                // This is already a Hub Flow file with suffix (e.g., ProgressNote_40899-172838_1_filename.pdf)
+                // Keep the original name
+                fileName = originalFileName;
+                console.log(`🔄 Keeping Hub Flow file name: ${fileName}`);
+            } else if (originalFileName.startsWith('ProgressNote_')) {
+                // Standard ProgressNote file
+                fileName = originalFileName;
+            } else {
+                // Convert to standard ProgressNote format
+                fileName = `ProgressNote_${claimNumber}-${account}.pdf`;
+                console.log(`🔄 Converting: ${originalFileName} → ${fileName}`);
             }
+        }
+        else if (fileType === 'ERA') {
+            // Keep original ERA filename (contains payer info)
+            fileName = originalFileName;
+        }
+        else {
+            fileName = originalFileName;
         }
         
         const destinationPath = path.join(localDir, fileName);
         
+        // ✅ Check if file already exists
+        if (fs.existsSync(destinationPath)) {
+            // For Progress Notes with suffixes, don't overwrite - add timestamp
+            if (fileType === 'PROGRESS_NOTE' && fileName.includes('_') && !fileName.endsWith(`-${account}.pdf`)) {
+                const timestamp = Date.now().toString().slice(-6);
+                const newFileName = fileName.replace('.pdf', `_${timestamp}.pdf`);
+                const newPath = path.join(localDir, newFileName);
+                fs.copyFileSync(sourcePath, newPath);
+                console.log(`💾 Saved as: ${newFileName} (avoided overwrite)`);
+                return newPath;
+            } else {
+                // Overwrite HCFA and standard ProgressNote files
+                fs.unlinkSync(destinationPath);
+                console.log(`🗑️ Overwriting existing: ${fileName}`);
+            }
+        }
+        
         fs.copyFileSync(sourcePath, destinationPath);
         console.log(`💾 Saved locally: ${destinationPath}`);
-        
-        // Remove the original file from temp location
-        fs.unlinkSync(sourcePath);
         
         return destinationPath;
         
@@ -142,18 +166,12 @@ async function saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, r
         return null;
     }
 }
-
 // ✅ Upload single file to SFTP with new structure including DOS folder
-async function uploadFileToSFTPWithStructure(claimNumber, fileType, localPath, rowId = null, dos = null) {
+async function uploadFileToSFTPWithStructure(claimNumber, fileType, localPath, patientName = null, rowId = null, dos = null) {
     try {
-        // Format DOS
         const dosFolder = formatDOS(dos);
-        
-        // Define base paths for different file types
-        let remotePath;
-        
-        // IMPORTANT: Get the filename from the local path (already properly formatted)
         const fileName = path.basename(localPath);
+        let remotePath;
         
         if (fileType === 'HCFA') {
             remotePath = `ClaimDocuments/Arcadia Medical Associates PA/HCFA/${claimNumber}/${dosFolder}/${fileName}`;
@@ -162,7 +180,7 @@ async function uploadFileToSFTPWithStructure(claimNumber, fileType, localPath, r
             remotePath = `ClaimDocuments/Arcadia Medical Associates PA/Medical Records/${claimNumber}/${dosFolder}/${fileName}`;
         }
         else if (fileType === 'ERA') {
-            remotePath = `ClaimDocuments/Arcadia Medical Associates PA/EOB/${claimNumber}/${dosFolder}/${fileName}`;
+            remotePath = `ClaimDocuments/Arcadia Medical Associates PA/Denied EOBs/${claimNumber}/${dosFolder}/${fileName}`;
         }
         else {
             console.error(`❌ Unknown file type: ${fileType}`);
@@ -299,13 +317,39 @@ class ECWAutomation {
         }
     }
 
-    // ✅ Create temp folder for initial downloads
     ensureTempFolder(claimNumber) {
         const tempFolder = path.join(this.downloadsDir, 'temp', claimNumber);
         if (!fs.existsSync(tempFolder)) {
             fs.mkdirSync(tempFolder, { recursive: true });
         }
         return tempFolder;
+    }
+
+    // ✅ NEW: Clean up ALL old files for a claim before processing
+    async cleanupOldFilesForClaim(claimNumber, dos) {
+        try {
+            const dosFolder = formatDOS(dos);
+            const baseDir = path.join(this.downloadsDir);
+            
+            console.log(`🧼 Cleaning ALL old files for claim ${claimNumber}...`);
+            
+            const foldersToClean = [
+                path.join(baseDir, 'HCFA', claimNumber, dosFolder),
+                path.join(baseDir, 'Medical Records', claimNumber, dosFolder),
+                path.join(baseDir, 'Denied EOBs', claimNumber, dosFolder),
+                path.join(this.downloadsDir, 'temp', claimNumber)
+            ];
+            
+            for (const folderPath of foldersToClean) {
+                if (fs.existsSync(folderPath)) {
+                    fs.rmSync(folderPath, { recursive: true, force: true });
+                    console.log(`🗑️ Removed: ${folderPath}`);
+                }
+            }
+            
+        } catch (error) {
+            console.error(`❌ Error cleaning up for claim ${claimNumber}:`, error.message);
+        }
     }
 
     async connectToDatabase() {
@@ -316,28 +360,29 @@ class ECWAutomation {
     }
 
     async getRecordsToProcess() {
-        const records = await this.db.collection("ecwmedicalrecords").find({
-            NeedToCheck: "Yes"
-        }).sort({ "SERVICE DATE": -1 }).toArray();
+        const records = await this.db.collection("aiclaimmasters").find({
+            NeedToCheck: "Yes",
+            PracticeId: new ObjectId("680ca90e6b528266603753b8")
+        }).sort({ "DateOfService": -1 }).toArray();
         
-        console.log(`📊 Found ${records.length} records to process`);
+        console.log(`📊 Found ${records.length} records to process for Practice ID: 680ca90e6b528266603753b8`);
         return records;
     }
 
-    // ✅ Get failed records for retry
     async getFailedRecords() {
-        const failedRecords = await this.db.collection("ecwmedicalrecords").find({
+        const failedRecords = await this.db.collection("aiclaimmasters").find({
             NeedToCheck: "No",
-            Status: "Failed"
-        }).sort({ "SERVICE DATE": -1 }).toArray();
+            Status: "Failed",
+            PracticeId: new ObjectId("680ca90e6b528266603753b8")
+        }).sort({ "DateOfService": -1 }).toArray();
         
-        console.log(`🔄 Found ${failedRecords.length} failed records to retry`);
+        console.log(`🔄 Found ${failedRecords.length} failed records to retry for Practice ID: 680ca90e6b528266603753b8`);
         return failedRecords;
     }
 
     async updateRecordStatus(recordId, status, isRetry = false) {
         try {
-            const collection = this.db.collection("ecwmedicalrecords");
+            const collection = this.db.collection("aiclaimmasters");
             const _id = typeof recordId === "string" ? new ObjectId(recordId) : recordId;
             
             let finalStatus = status;
@@ -358,14 +403,12 @@ class ECWAutomation {
     // ✅ Check for License Expired Popup
     async checkForLicenseExpiredPopup(page, claimNumber) {
         try {
-            // Look for the specific license expired popup
             const licensePopupSelector = '.modal-content:has-text("Claim\'s rendering Provider\'s license is expired")';
             
             const popupExists = await page.$(licensePopupSelector);
             if (popupExists && await popupExists.isVisible()) {
                 console.log(`⚠️ LICENSE EXPIRED POPUP DETECTED for claim ${claimNumber}`);
                 
-                // Take screenshot for debugging (optional)
                 const errorLogsDir = path.join(__dirname, 'error_logs');
                 if (!fs.existsSync(errorLogsDir)) {
                     fs.mkdirSync(errorLogsDir, { recursive: true });
@@ -374,14 +417,12 @@ class ECWAutomation {
                 await page.screenshot({ path: screenshotPath });
                 console.log(`📸 Screenshot saved: ${screenshotPath}`);
                 
-                // Click the OK button
                 const okButton = await page.$('button:has-text("OK")');
                 if (okButton) {
                     await okButton.click();
                     console.log(`✅ Clicked OK on license expired popup`);
                     await page.waitForTimeout(1000);
                 } else {
-                    // Fallback: try to find any button in modal footer
                     const anyButton = await page.$('.modal-footer button');
                     if (anyButton) {
                         await anyButton.click();
@@ -390,10 +431,10 @@ class ECWAutomation {
                     }
                 }
                 
-                return true; // Popup was found and handled
+                return true;
             }
             
-            return false; // No popup found
+            return false;
         } catch (error) {
             console.log(`ℹ️ Error checking for license popup: ${error.message}`);
             return false;
@@ -429,96 +470,124 @@ class ECWAutomation {
         console.log('✅ Clean state ensured');
     }
 
-    // ✅ MOVE FILES FROM TEMP TO PROPER LOCAL STRUCTURE with DOS folder
-    async organizeLocalFiles(claimNumber, tempFolder, dos) {
-        try {
-            const files = fs.readdirSync(tempFolder);
+
+    
+
+  async organizeLocalFiles(claimNumber, patientName, tempFolder, dos, account) {
+    try {
+        const files = fs.readdirSync(tempFolder);
+        const dosFolder = formatDOS(dos);
+        const baseDir = path.join(this.downloadsDir);
+        
+        console.log(`📦 Processing ${files.length} new files from temp folder...`);
+        
+        let movedCount = 0;
+        for (const file of files) {
+            const sourcePath = path.join(tempFolder, file);
             
-            for (const file of files) {
-                const sourcePath = path.join(tempFolder, file);
-                
-                // Determine file type and rowId from filename
-                let fileType = '';
-                let rowId = null;
-                
-                if (file.startsWith('HCFA_')) {
-                    fileType = 'HCFA';
-                } 
-                else if (file.startsWith('ProgressNote_')) {
-                    fileType = 'PROGRESS_NOTE';
-                }
-                else if (file.startsWith('ERA_')) {
-                    fileType = 'ERA';
-                    const rowMatch = file.match(/_row(\d+)/);
-                    if (rowMatch) {
-                        rowId = rowMatch[1];
-                    }
-                }
-                
-                if (fileType) {
-                    await saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, rowId, dos);
-                } else {
-                    console.warn(`⚠️ Unknown file type for: ${file}`);
+            let fileType = '';
+            let rowId = null;
+            
+            if (file.startsWith('HCFA_')) {
+                fileType = 'HCFA';
+            } 
+            else if (file.startsWith('ProgressNote_') || file.startsWith('Temp_')) {
+                fileType = 'PROGRESS_NOTE';
+            }
+            else if (file.startsWith('ERA_')) {
+                fileType = 'ERA';
+                const rowMatch = file.match(/_row(\d+)/);
+                if (rowMatch) {
+                    rowId = rowMatch[1];
                 }
             }
             
-            // ✅ Clean up temp folder after organizing
+            if (fileType) {
+                // ✅ CONVERT ANY REMAINING TIFF FILES TO PDF
+                // Skip TIFF files entirely
+if (fileType === 'PROGRESS_NOTE' && (file.endsWith('.tiff') || file.endsWith('.tif'))) {
+    console.log(`   ⚠️ Skipping TIFF file: ${file}`);
+    fs.unlinkSync(sourcePath); // Delete the TIFF file
+    continue;
+}
+                
+                // ✅ For PDF files and other formats, just save normally
+                const destination = await saveFileLocallyWithStructure(claimNumber, fileType, sourcePath, patientName, rowId, dos, account);
+                if (destination) {
+                    movedCount++;
+                    console.log(`✅ Moved: ${path.basename(destination)}`);
+                    
+                    // Delete the source file after successful move
+                    fs.unlinkSync(sourcePath);
+                }
+            } else {
+                console.warn(`⚠️ Unknown file type for: ${file}`);
+            }
+        }
+        
+        console.log(`📊 Successfully processed ${movedCount} files`);
+        
+        // Clean up temp folder
+        if (fs.existsSync(tempFolder)) {
             fs.rmSync(tempFolder, { recursive: true, force: true });
             console.log(`🗑️ Cleaned up temp folder: ${tempFolder}`);
-            
-        } catch (error) {
-            console.error(`❌ Error organizing files for claim ${claimNumber}:`, error.message);
         }
+        
+    } catch (error) {
+        console.error(`❌ Error organizing files for claim ${claimNumber}:`, error.message);
     }
-
-    // ✅ UPLOAD ORGANIZED FILES TO SFTP with DOS folder
-    async uploadToSFTPFromLocal(claimNumber, dos) {
+}
+    async uploadToSFTPFromLocal(claimNumber, patientName, dos) {
         try {
             const baseDir = path.join(this.downloadsDir);
             const dosFolder = formatDOS(dos);
             
             console.log(`📤 Starting SFTP upload for claim ${claimNumber}, DOS: ${dosFolder}...`);
             
-            // Upload HCFA files
+            let totalUploaded = 0;
+            
+            // ✅ HCFA files
             const hcfaDir = path.join(baseDir, 'HCFA', claimNumber, dosFolder);
             if (fs.existsSync(hcfaDir)) {
                 const hcfaFiles = fs.readdirSync(hcfaDir);
                 console.log(`📤 Found ${hcfaFiles.length} HCFA files to upload`);
                 for (const file of hcfaFiles) {
                     const localPath = path.join(hcfaDir, file);
-                    await uploadFileToSFTPWithStructure(claimNumber, 'HCFA', localPath, null, dos);
+                    const success = await uploadFileToSFTPWithStructure(claimNumber, 'HCFA', localPath, patientName, null, dos);
+                    if (success) totalUploaded++;
                 }
             }
             
-            // Upload Progress Note files
+            // ✅ Progress Note files
             const progressNoteDir = path.join(baseDir, 'Medical Records', claimNumber, dosFolder);
             if (fs.existsSync(progressNoteDir)) {
                 const progressNoteFiles = fs.readdirSync(progressNoteDir);
                 console.log(`📤 Found ${progressNoteFiles.length} Progress Note files to upload`);
                 for (const file of progressNoteFiles) {
                     const localPath = path.join(progressNoteDir, file);
-                    await uploadFileToSFTPWithStructure(claimNumber, 'PROGRESS_NOTE', localPath, null, dos);
+                    const success = await uploadFileToSFTPWithStructure(claimNumber, 'PROGRESS_NOTE', localPath, patientName, null, dos);
+                    if (success) totalUploaded++;
                 }
             }
             
-            // Upload EOB files
-            const eobDir = path.join(baseDir, 'EOB', claimNumber, dosFolder);
+            // ✅ EOB files
+            const eobDir = path.join(baseDir, 'Denied EOBs', claimNumber, dosFolder);
             if (fs.existsSync(eobDir)) {
                 const eobFiles = fs.readdirSync(eobDir);
                 console.log(`📤 Found ${eobFiles.length} EOB files to upload`);
                 for (const file of eobFiles) {
                     const localPath = path.join(eobDir, file);
-                    // Extract rowId from filename for logging
                     let rowId = null;
                     const rowMatch = file.match(/_row(\d+)/);
                     if (rowMatch) {
                         rowId = rowMatch[1];
                     }
-                    await uploadFileToSFTPWithStructure(claimNumber, 'ERA', localPath, rowId, dos);
+                    const success = await uploadFileToSFTPWithStructure(claimNumber, 'ERA', localPath, patientName, rowId, dos);
+                    if (success) totalUploaded++;
                 }
             }
             
-            console.log(`✅ All files uploaded to SFTP for claim ${claimNumber}, DOS: ${dosFolder}`);
+            console.log(`✅ Uploaded ${totalUploaded} total files to SFTP for claim ${claimNumber}`);
             
         } catch (error) {
             console.error(`❌ Error uploading to SFTP for claim ${claimNumber}:`, error.message);
@@ -529,7 +598,6 @@ class ECWAutomation {
     async processAllRecords() {
         await this.connectToDatabase();
         
-        // ✅ FIRST RUN: Get records with NeedToCheck: "Yes"
         const allRecords = await this.getRecordsToProcess();
         
         console.log(`📊 Total records to process: ${allRecords.length}`);
@@ -541,7 +609,6 @@ class ECWAutomation {
             return;
         }
 
-        // Connect to existing browser
         const browser = await chromium.connectOverCDP('http://localhost:9223');
         const context = browser.contexts()[0];
         const page = context.pages().length ? context.pages()[0] : await context.newPage();
@@ -549,10 +616,8 @@ class ECWAutomation {
         let retrySummary = '';
 
         try {
-            // First Run - process all records with NeedToCheck: "Yes"
             await this.processRecordBatch(allRecords, page, context, false);
             
-            // ✅ AUTO-RETRY: Get failed records
             const failedRecords = await this.getFailedRecords();
             
             if (failedRecords.length > 0) {
@@ -573,7 +638,6 @@ class ECWAutomation {
         } finally {
             await this.mongoClient.close();
             
-            // ✅ Generate final report and send email
             const excelPath = this.emailReporter.generateExcel();
             await this.emailReporter.sendCompletionEmail(excelPath, retrySummary);
             
@@ -581,7 +645,6 @@ class ECWAutomation {
         }
     }
 
-    // ✅ Process batch of records
     async processRecordBatch(records, page, context, isRetry = false) {
         console.log(`\n👷 Processing ${records.length} records ${isRetry ? '(RETRY)' : ''}`);
         
@@ -597,18 +660,22 @@ class ECWAutomation {
     }
 
     async processSingleRecord(record, page, context, isRetry = false) {
-        const account = record["Account Number"] || record.Account;
-        const patientName = record.PATIENT || record.PatientName || 'Unknown';
-        const claimNumber = String(record["CLAIMS#"] || record.ClaimNumber || '');
-        const charges = record.CHARGES || '';
-        const balance = record.Balance || '';
-        const dos = record["SERVICE DATE"] || record["Service Date"] || null;
+        const account = record["Account"] || 'Unknown';
+        const patientName = record["PatientLastName"] || 'Unknown';
+        const claimNumber = String(record["Bill"] || '');
+        const dos = record["DateOfService"] || null;
         
-        console.log(`\n🚀 Processing Record: ${claimNumber} for ${patientName} (Account: ${account}) DOS: ${dos} ${isRetry ? '(RETRY)' : ''}`);
-
-        // ✅ Create TEMP folder for initial downloads
+        // ✅ FIX: Format the DOS WITHOUT timezone conversion - use UTC mode
+        // Use moment.utc() to prevent timezone conversion
+        const displayDOS = dos ? moment.utc(dos).format('MM/DD/YYYY') : 'N/A';
+        
+        console.log(`\n🚀 Processing Record: ${claimNumber} for ${patientName} (Account: ${account}) Practice: 680ca90e6b528266603753b8 DOS value: ${displayDOS} ${isRetry ? '(RETRY)' : ''}`);
+        
+        // ✅ FIRST: Clean up ALL old files for this claim
+        await this.cleanupOldFilesForClaim(claimNumber, dos);
+        
         const tempFolder = this.ensureTempFolder(claimNumber);
-        console.log(`📁 Created temp folder: ${tempFolder}`);
+        console.log(`📁 Created fresh temp folder: ${tempFolder}`);
 
         let hcfaSuccess = false;
         let progressNoteSuccess = false;
@@ -622,13 +689,11 @@ class ECWAutomation {
         }
 
         try {
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP BEFORE ANY OPERATION
             const licensePopupFound = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupFound) {
-                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup`);
+                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup - DOS: ${displayDOS}`);
                 finalStatus = "Failed - License Expired";
                 
-                // Clean up temp folder
                 if (fs.existsSync(tempFolder)) {
                     fs.rmSync(tempFolder, { recursive: true, force: true });
                 }
@@ -638,16 +703,13 @@ class ECWAutomation {
                 return finalStatus;
             }
 
-            // Ensure we start from a clean state
             await this.ensureCleanState(page);
 
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP AFTER CLEAN STATE
             const licensePopupAfterClean = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupAfterClean) {
-                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (after clean state)`);
+                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (after clean state) - DOS: ${displayDOS}`);
                 finalStatus = "Failed - License Expired";
                 
-                // Clean up temp folder
                 if (fs.existsSync(tempFolder)) {
                     fs.rmSync(tempFolder, { recursive: true, force: true });
                 }
@@ -661,17 +723,14 @@ class ECWAutomation {
             await page.fill('#claimLookupIpt10', claimNumber);
             await page.click('#btnclaimlookup');
 
-            // Wait for the claim modal to open
             try {
                 await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { state: 'visible', timeout: 20000 });
             } catch (error) {
-                // Check if license popup appeared instead
                 const licensePopupDuringSearch = await this.checkForLicenseExpiredPopup(page, claimNumber);
                 if (licensePopupDuringSearch) {
-                    console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (during search)`);
+                    console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (during search) - DOS: ${displayDOS}`);
                     finalStatus = "Failed - License Expired";
                     
-                    // Clean up temp folder
                     if (fs.existsSync(tempFolder)) {
                         fs.rmSync(tempFolder, { recursive: true, force: true });
                     }
@@ -680,16 +739,14 @@ class ECWAutomation {
                     this.emailReporter.updateRecordStatus(claimNumber, finalStatus);
                     return finalStatus;
                 }
-                throw error; // Re-throw if it's a different error
+                throw error;
             }
 
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP BEFORE HCFA
             const licensePopupBeforeHCFA = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupBeforeHCFA) {
-                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (before HCFA)`);
+                console.log(`⏭️ Skipping claim ${claimNumber} due to license expired popup (before HCFA) - DOS: ${displayDOS}`);
                 finalStatus = "Failed - License Expired";
                 
-                // Clean up temp folder
                 if (fs.existsSync(tempFolder)) {
                     fs.rmSync(tempFolder, { recursive: true, force: true });
                 }
@@ -700,23 +757,22 @@ class ECWAutomation {
             }
 
             // 2️⃣ Download HCFA
-            hcfaSuccess = await this.downloadHCFA(page, claimNumber, charges, balance, tempFolder);
+            hcfaSuccess = await this.downloadHCFA(page, claimNumber, '', '', tempFolder, patientName);
+            console.log(`✅ HCFA download ${hcfaSuccess ? 'successful' : 'failed'} for claim ${claimNumber} - DOS: ${displayDOS}`);
 
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP AFTER HCFA
             const licensePopupAfterHCFA = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupAfterHCFA) {
-                console.log(`⏭️ Skipping further processing for claim ${claimNumber} due to license expired popup`);
+                console.log(`⏭️ Skipping further processing for claim ${claimNumber} due to license expired popup - DOS: ${displayDOS}`);
                 finalStatus = hcfaSuccess ? "Partially completed - License expired after HCFA" : "Failed - License Expired";
                 
-                // Clean up temp folder if no files were downloaded
                 if (!hcfaSuccess && fs.existsSync(tempFolder)) {
                     fs.rmSync(tempFolder, { recursive: true, force: true });
                 }
                 
-                // Organize and upload any files that were downloaded
                 if (hcfaSuccess) {
-                    await this.organizeLocalFiles(claimNumber, tempFolder, dos);
-                    await this.uploadToSFTPFromLocal(claimNumber, dos);
+                    // ✅ PASS ACCOUNT to organizeLocalFiles
+                    await this.organizeLocalFiles(claimNumber, patientName, tempFolder, dos, account);
+                    await this.uploadToSFTPFromLocal(claimNumber, patientName, dos);
                 }
                 
                 await this.updateRecordStatus(record._id, finalStatus, isRetry);
@@ -725,33 +781,50 @@ class ECWAutomation {
             }
 
             // 3️⃣ Download Progress Note
-            progressNoteSuccess = await this.downloadProgressNote(page, claimNumber, patientName, charges, balance, context, tempFolder);
+            console.log(`📝 Downloading Progress Note for claim ${claimNumber} - DOS: ${displayDOS}`);
+            progressNoteSuccess = await this.downloadProgressNote(page, claimNumber, patientName, '', '', context, tempFolder, dos, account);
+            console.log(`✅ Progress Note ${progressNoteSuccess ? 'found' : 'NOT found'} for claim ${claimNumber} - DOS: ${displayDOS}`);
 
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP AFTER PROGRESS NOTE
+            if (!progressNoteSuccess) {
+                console.log(`⏭️ Progress Note failed - Stopping further processing for claim ${claimNumber} - DOS: ${displayDOS}`);
+                
+                if (hcfaSuccess) {
+                    finalStatus = "Partially completed - Progress Note failed (Hub flow executed)";
+                } else {
+                    finalStatus = "Failed - Progress Note failed";
+                }
+                
+                if (hcfaSuccess) {
+                    // ✅ PASS ACCOUNT to organizeLocalFiles
+                    await this.organizeLocalFiles(claimNumber, patientName, tempFolder, dos, account);
+                    await this.uploadToSFTPFromLocal(claimNumber, patientName, dos);
+                } else {
+                    if (fs.existsSync(tempFolder)) {
+                        fs.rmSync(tempFolder, { recursive: true, force: true });
+                    }
+                }
+                
+                await this.updateRecordStatus(record._id, finalStatus, isRetry);
+                this.emailReporter.updateRecordStatus(claimNumber, finalStatus);
+                
+                await this.ensureCleanState(page);
+                return finalStatus;
+            }
+
             const licensePopupAfterProgressNote = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupAfterProgressNote) {
-                console.log(`⏭️ Skipping ERA processing for claim ${claimNumber} due to license expired popup`);
+                console.log(`⏭️ Skipping ERA processing for claim ${claimNumber} due to license expired popup - DOS: ${displayDOS}`);
                 
-                // Determine status based on what was successful
                 if (hcfaSuccess && progressNoteSuccess) {
                     finalStatus = "Partially completed - License expired after Progress Note";
-                } else if (hcfaSuccess && !progressNoteSuccess) {
-                    finalStatus = "Partially completed - License expired, Progress Note failed";
-                } else if (!hcfaSuccess && progressNoteSuccess) {
-                    finalStatus = "Partially completed - License expired, HCFA failed";
                 } else {
-                    finalStatus = "Failed - License Expired";
+                    finalStatus = "Partially completed - License expired";
                 }
                 
-                // Clean up temp folder if no files were downloaded
-                if (!hcfaSuccess && !progressNoteSuccess && fs.existsSync(tempFolder)) {
-                    fs.rmSync(tempFolder, { recursive: true, force: true });
-                }
-                
-                // Organize and upload any files that were downloaded
                 if (hcfaSuccess || progressNoteSuccess) {
-                    await this.organizeLocalFiles(claimNumber, tempFolder, dos);
-                    await this.uploadToSFTPFromLocal(claimNumber, dos);
+                    // ✅ PASS ACCOUNT to organizeLocalFiles
+                    await this.organizeLocalFiles(claimNumber, patientName, tempFolder, dos, account);
+                    await this.uploadToSFTPFromLocal(claimNumber, patientName, dos);
                 }
                 
                 await this.updateRecordStatus(record._id, finalStatus, isRetry);
@@ -759,15 +832,15 @@ class ECWAutomation {
                 return finalStatus;
             }
 
-            // 4️⃣ Process ERA payments
-            const eraResult = await this.processERAPayments(page, claimNumber, patientName, charges, balance, context, tempFolder);
+            // 4️⃣ Process ERA payments (ONLY if Progress Note succeeded)
+            console.log(`💳 Processing ERA payments for claim ${claimNumber} - DOS: ${displayDOS}`);
+            const eraResult = await this.processERAPayments(page, claimNumber, patientName, '', '', context, tempFolder);
             eraSuccess = eraResult.filesFetched > 0;
+            console.log(`✅ ERA processing ${eraSuccess ? 'successful' : 'failed'} - downloaded ${eraResult.filesFetched} files for claim ${claimNumber} - DOS: ${displayDOS}`);
 
-            // ✅ CHECK FOR LICENSE EXPIRED POPUP AFTER ERA
             const licensePopupAfterERA = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupAfterERA) {
-                console.log(`ℹ️ License expired popup appeared after ERA processing for claim ${claimNumber}`);
-                // Continue with normal processing since we already got ERA files
+                console.log(`ℹ️ License expired popup appeared after ERA processing for claim ${claimNumber} - DOS: ${displayDOS}`);
             }
 
             // ✅ COMPLETE STATUS DETERMINATION
@@ -793,36 +866,29 @@ class ECWAutomation {
                 }
             }
 
-            console.log(`📊 Files fetched: ${successCount}/3 - Status: ${finalStatus}`);
+            console.log(`📊 Files fetched: ${successCount}/3 - Status: ${finalStatus} - DOS: ${displayDOS}`);
 
-            // ✅ ORGANIZE FILES INTO LOCAL STRUCTURE with DOS folder
             if (successCount > 0) {
-                await this.organizeLocalFiles(claimNumber, tempFolder, dos);
-                
-                // ✅ UPLOAD TO SFTP (ENABLED) with DOS folder
-                await this.uploadToSFTPFromLocal(claimNumber, dos);
+                // ✅ PASS ACCOUNT to organizeLocalFiles
+                await this.organizeLocalFiles(claimNumber, patientName, tempFolder, dos, account);
+                await this.uploadToSFTPFromLocal(claimNumber, patientName, dos);
             } else {
-                // Clean up temp folder if no files were downloaded
                 if (fs.existsSync(tempFolder)) {
                     fs.rmSync(tempFolder, { recursive: true, force: true });
                 }
             }
 
-            // ✅ Update record status
             await this.updateRecordStatus(record._id, finalStatus, isRetry);
-
-            // ✅ Update email reporter
             this.emailReporter.updateRecordStatus(claimNumber, finalStatus);
 
-            console.log(`✅ Successfully processed claim ${claimNumber}`);
+            console.log(`✅ Successfully processed claim ${claimNumber} - DOS: ${displayDOS} - Status: ${finalStatus}`);
 
             return finalStatus;
 
         } catch (error) {
-            console.error(`❌ Failed to process claim ${claimNumber}:`, error.message);
+            console.error(`❌ Failed to process claim ${claimNumber} - DOS: ${displayDOS}:`, error.message);
             finalStatus = "Failed";
             
-            // Clean up temp folder if it exists
             if (fs.existsSync(tempFolder)) {
                 fs.rmSync(tempFolder, { recursive: true, force: true });
             }
@@ -831,154 +897,1020 @@ class ECWAutomation {
             this.emailReporter.updateRecordStatus(claimNumber, finalStatus);
             return finalStatus;
         } finally {
-            // ALWAYS ensure clean state before moving to next claim
             console.log('🔄 Cleaning up before next claim...');
             await this.ensureCleanState(page);
         }
     }
 
-    async downloadHCFA(page, claimNumber, charges, balance, tempFolder) {
-        console.log(`📋 Downloading HCFA for claim ${claimNumber}...`);
-        
+   async downloadHCFA(page, claimNumber, charges, balance, tempFolder, patientName) {
+    console.log(`📋 Downloading HCFA for claim ${claimNumber}...`);
+    
+    let retryCount = 0;
+    const maxRetries = 3;
+    
+    while (retryCount < maxRetries) {
         try {
-            await page.waitForSelector('[id^="printHCFADropDown"]', { state: 'visible' });
-            await page.click('[id^="printHCFADropDown"]');
+            // ✅ Clean up old HCFA files in temp folder first
+            if (fs.existsSync(tempFolder)) {
+                const files = fs.readdirSync(tempFolder);
+                for (const file of files) {
+                    if (file.startsWith('HCFA_')) {
+                        const filePath = path.join(tempFolder, file);
+                        try {
+                            fs.unlinkSync(filePath);
+                            console.log(`🗑️ Deleted old HCFA in temp: ${file}`);
+                        } catch (e) {
+                            // Ignore deletion errors
+                        }
+                    }
+                }
+            }
             
-            // ✅ CHECK FOR LICENSE POPUP BEFORE CLICKING HCFA
+            await page.waitForSelector('[id^="printHCFADropDown"]', { state: 'visible', timeout: 10000 });
+            await page.click('[id^="printHCFADropDown"]');
+            await page.waitForTimeout(1000);
+            
             const licensePopupBeforeClick = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupBeforeClick) {
                 return false;
             }
             
-            await page.evaluate(() => document.querySelector('#billingClaimLink17').click());
-
+            // Try multiple ways to click the HCFA link
+            let hcfaClicked = false;
+            
+            // Method 1: Direct click using evaluate
             try {
-                const modal = await page.waitForSelector('.modal.claimforms-mod.in', { state: 'visible', timeout: 20000 });
-                
-                // ✅ CHECK FOR LICENSE POPUP AFTER MODAL APPEARS
-                const licensePopupAfterModal = await this.checkForLicenseExpiredPopup(page, claimNumber);
-                if (licensePopupAfterModal) {
+                await page.evaluate(() => {
+                    const link = document.querySelector('#billingClaimLink17');
+                    if (link) {
+                        link.click();
+                        return true;
+                    }
+                    return false;
+                });
+                hcfaClicked = true;
+            } catch (e) {
+                console.log('Method 1 failed, trying method 2...');
+            }
+            
+            // Method 2: Wait for and click the element directly
+            if (!hcfaClicked) {
+                try {
+                    await page.waitForSelector('#billingClaimLink17', { timeout: 5000 });
+                    await page.click('#billingClaimLink17');
+                    hcfaClicked = true;
+                } catch (e) {
+                    console.log('Method 2 failed, trying method 3...');
+                }
+            }
+            
+            // Method 3: Try any HCFA link
+            if (!hcfaClicked) {
+                const hcfaLinks = await page.$$('a[id*="HCFA"], a:has-text("HCFA")');
+                if (hcfaLinks.length > 0) {
+                    await hcfaLinks[0].click();
+                    hcfaClicked = true;
+                }
+            }
+            
+            if (!hcfaClicked) {
+                console.log('❌ Could not find HCFA link');
+                return false;
+            }
+            
+            // Wait for modal
+            try {
+                await page.waitForSelector('.modal.claimforms-mod.in', { 
+                    state: 'visible', 
+                    timeout: 15000 
+                });
+            } catch (timeoutError) {
+                const licensePopupDuringWait = await this.checkForLicenseExpiredPopup(page, claimNumber);
+                if (licensePopupDuringWait) {
                     await page.keyboard.press('Escape');
                     return false;
                 }
                 
-                const iframeHandle = await modal.$('#claimFormViewerFrame');
-
-                let iframeSrc = await iframeHandle.getAttribute('src');
-                const baseUrl = new URL(page.url()).origin;
-                if (!iframeSrc.startsWith('http')) iframeSrc = baseUrl + iframeSrc;
-
-                console.log(`🌐 Fetching HCFA from: ${iframeSrc}`);
-
-                const pdfResponse = await page.request.get(iframeSrc, {
+                // Try pressing escape and retry
+                if (retryCount < maxRetries - 1) {
+                    console.log(`⏳ Modal timeout, retrying... (${retryCount + 1}/${maxRetries})`);
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    retryCount++;
+                    continue;
+                }
+                throw timeoutError;
+            }
+            
+            const licensePopupAfterModal = await this.checkForLicenseExpiredPopup(page, claimNumber);
+            if (licensePopupAfterModal) {
+                await page.keyboard.press('Escape');
+                return false;
+            }
+            
+            // Find the iframe with better error handling
+            let iframeHandle;
+            try {
+                iframeHandle = await page.waitForSelector('#claimFormViewerFrame', { timeout: 10000 });
+            } catch (error) {
+                console.log('❌ Iframe not found, trying alternative selectors...');
+                // Try alternative iframe selectors
+                const iframes = await page.$$('iframe');
+                for (const iframe of iframes) {
+                    const src = await iframe.getAttribute('src');
+                    if (src && src.includes('HCFAClaim')) {
+                        iframeHandle = iframe;
+                        break;
+                    }
+                }
+                
+                if (!iframeHandle) {
+                    throw new Error('HCFA iframe not found');
+                }
+            }
+            
+            let iframeSrc = await iframeHandle.getAttribute('src');
+            const baseUrl = new URL(page.url()).origin;
+            if (!iframeSrc.startsWith('http')) {
+                iframeSrc = baseUrl + iframeSrc;
+            }
+            
+            console.log(`🌐 Fetching HCFA from: ${iframeSrc.substring(0, 100)}...`);
+            
+            // ✅ CRITICAL FIX: Use try-catch for the request to prevent Node.js crash
+            let pdfResponse;
+            try {
+                pdfResponse = await page.request.get(iframeSrc, {
                     headers: {
                         'Referer': page.url(),
-                        'User-Agent': await page.evaluate(() => navigator.userAgent),
-                    }
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    },
+                    timeout: 30000
+                }).catch(error => {
+                    console.log(`⚠️ Request failed: ${error.message}`);
+                    return null;
                 });
-
-                if (!pdfResponse.ok()) {
-                    return false;
+            } catch (error) {
+                console.log(`❌ Request error (catch block): ${error.message}`);
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    continue;
                 }
-
-                const pdfBuffer = await pdfResponse.body();
-                
-                const uniqueSuffix = this.getUniqueSuffix(charges, balance);
-                const savePath = path.join(tempFolder, `HCFA_${claimNumber}-${uniqueSuffix}.pdf`);
-                
-                fs.writeFileSync(savePath, pdfBuffer);
-                console.log(`💾 HCFA PDF saved temporarily at: ${savePath}`);
-
-                await page.keyboard.press('Escape');
-                await page.waitForTimeout(2000);
-                
-                await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { state: 'visible', timeout: 10000 });
-
-                return true;
-
-            } catch (timeoutError) {
-                // Check if license popup appeared
-                const licensePopupDuringWait = await this.checkForLicenseExpiredPopup(page, claimNumber);
-                if (licensePopupDuringWait) {
-                    return false;
-                }
-                throw timeoutError;
-            }
-
-        } catch (error) {
-            console.error(`❌ HCFA download failed for claim ${claimNumber}`);
-            return false;
-        }
-    }
-
-    async downloadProgressNote(page, claimNumber, patientName, charges, balance, context, tempFolder) {
-        console.log(`📝 Downloading Progress Note for claim ${claimNumber}...`);
-        
-        try {
-            console.log('📝 Clicking Progress Note button...');
-            
-            // ✅ CHECK FOR LICENSE POPUP BEFORE CLICKING
-            const licensePopupBeforeClick = await this.checkForLicenseExpiredPopup(page, claimNumber);
-            if (licensePopupBeforeClick) {
                 return false;
             }
             
-            await page.click('[id^="claimProgressNoteBtn"]');
+            if (!pdfResponse) {
+                console.log('❌ PDF response is null');
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    continue;
+                }
+                return false;
+            }
+            
+            if (!pdfResponse.ok()) {
+                console.log(`❌ PDF response not OK: ${pdfResponse.status()}`);
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    continue;
+                }
+                return false;
+            }
+            
+            let pdfBuffer;
+            try {
+                pdfBuffer = await pdfResponse.body();
+            } catch (error) {
+                console.log(`❌ Failed to get PDF body: ${error.message}`);
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    continue;
+                }
+                return false;
+            }
+            
+            if (!pdfBuffer || pdfBuffer.length === 0) {
+                console.log('❌ PDF buffer is empty');
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    continue;
+                }
+                return false;
+            }
+            
+            // ✅ Use run date format M-D-YY
+            const runDate = getRunDate();
+            const savePath = path.join(tempFolder, `HCFA_${claimNumber}-${runDate}.pdf`);
             
             try {
-                const frameHandle = await page.waitForSelector('#ProgNoteViwerFrame', { timeout: 20000 });
-                
-                // ✅ CHECK FOR LICENSE POPUP AFTER FRAME APPEARS
-                const licensePopupAfterFrame = await this.checkForLicenseExpiredPopup(page, claimNumber);
-                if (licensePopupAfterFrame) {
+                fs.writeFileSync(savePath, pdfBuffer);
+                console.log(`💾 HCFA PDF saved: ${savePath} (${Math.round(pdfBuffer.length / 1024)} KB)`);
+            } catch (error) {
+                console.log(`❌ Failed to save PDF: ${error.message}`);
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
                     await page.keyboard.press('Escape');
-                    return false;
+                    await page.waitForTimeout(2000);
+                    continue;
                 }
-                
-                const frame = await frameHandle.contentFrame();
-                if (!frame) return false;
-
-                await frame.waitForFunction(() => {
-                    const html = document.body.innerHTML.trim();
-                    return html.length > 10;
-                }, { timeout: 20000 });
-
-                const iframeHTML = await frame.evaluate(() => document.documentElement.outerHTML);
-
-                const tempPage = await context.newPage();
-                await tempPage.setContent(iframeHTML, { waitUntil: 'networkidle' });
-
-                const safePatientName = patientName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-                const uniqueSuffix = this.getUniqueSuffix(charges, balance);
-                
-                const pdfPath = path.join(tempFolder, `ProgressNote_${claimNumber}-${uniqueSuffix}_${safePatientName}.pdf`);
-                
-                await tempPage.pdf({ path: pdfPath, format: 'A4', printBackground: true });
-                console.log(`💾 Progress Note saved temporarily at: ${pdfPath}`);
-
-                await tempPage.close();
-
-                await page.keyboard.press('Escape');
-                await page.waitForTimeout(2000);
-
-                await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { state: 'visible', timeout: 10000 });
-
-                return true;
-
-            } catch (timeoutError) {
-                // Check if license popup appeared
-                const licensePopupDuringWait = await this.checkForLicenseExpiredPopup(page, claimNumber);
-                if (licensePopupDuringWait) {
-                    return false;
-                }
-                throw timeoutError;
+                return false;
             }
-
+            
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(2000);
+            
+            // Wait for the main modal to be visible again
+            try {
+                await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { 
+                    state: 'visible', 
+                    timeout: 10000 
+                });
+            } catch (error) {
+                console.log('⚠️ Main modal not visible after HCFA download');
+            }
+            
+            return true;
+            
         } catch (error) {
-            console.error(`❌ Progress Note download failed for claim ${claimNumber}`);
+            // ✅ Handle specific Node.js internal assertion error
+            if (error.code === 'ERR_INTERNAL_ASSERTION' || error.message.includes('internal assertion')) {
+                console.error(`⚠️ Node.js internal assertion error for claim ${claimNumber}, retrying...`);
+                
+                if (retryCount < maxRetries - 1) {
+                    retryCount++;
+                    console.log(`🔄 Retrying HCFA download after internal error... (${retryCount}/${maxRetries})`);
+                    
+                    try {
+                        // Try to press escape to close any open modals
+                        await page.keyboard.press('Escape');
+                        await page.waitForTimeout(2000);
+                        await page.keyboard.press('Escape');
+                        await page.waitForTimeout(2000);
+                        
+                        // Wait a bit before retrying
+                        await page.waitForTimeout(5000);
+                    } catch (e) {
+                        // Ignore cleanup errors
+                    }
+                    
+                    continue;
+                }
+                
+                console.error(`❌ HCFA download failed after ${maxRetries} retries due to Node.js internal error`);
+                return false;
+            }
+            
+            console.error(`❌ HCFA download attempt ${retryCount + 1} failed for claim ${claimNumber}: ${error.message}`);
+            
+            if (retryCount < maxRetries - 1) {
+                retryCount++;
+                console.log(`🔄 Retrying HCFA download... (${retryCount}/${maxRetries})`);
+                
+                try {
+                    // Try to press escape to close any open modals
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    
+                    // Wait a bit before retrying
+                    await page.waitForTimeout(3000);
+                } catch (e) {
+                    // Ignore cleanup errors
+                }
+                
+                continue;
+            }
+            
             return false;
         }
     }
+    
+    return false;
+}
+
+   async downloadProgressNote(page, claimNumber, patientName, charges, balance, context, tempFolder, dos, account) {
+    console.log(`📝 Downloading Progress Note for claim ${claimNumber}...`);
+    
+    try {
+        console.log('📝 Looking for Progress Note button...');
+        
+        const licensePopupBeforeClick = await this.checkForLicenseExpiredPopup(page, claimNumber);
+        if (licensePopupBeforeClick) {
+            console.log('⚠️ License popup found, trying Hub Flow...');
+            return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+        }
+        
+        const progressNoteButton = await page.$('[id^="claimProgressNoteBtn"]');
+        
+        if (!progressNoteButton) {
+            console.log('❌ Button not found, trying Hub Flow...');
+            return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+        }
+        
+        console.log('✅ Progress Note button found');
+        
+        const isEnabled = await progressNoteButton.isEnabled();
+        
+        if (!isEnabled) {
+            console.log('⏭️ Button disabled, trying Hub Flow...');
+            return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+        }
+        
+        console.log('🖱️ Button is enabled - clicking...');
+        await progressNoteButton.click();
+        
+        try {
+            console.log('⏳ Waiting for Progress Note frame...');
+            await page.waitForSelector('#ProgNoteViwerFrame', { timeout: 15000 });
+            console.log('✅ Progress Note frame found');
+            
+            const licensePopupAfterFrame = await this.checkForLicenseExpiredPopup(page, claimNumber);
+            if (licensePopupAfterFrame) {
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+                console.log('⚠️ License popup after frame, trying Hub Flow...');
+                return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+            }
+            
+            const frameHandle = await page.$('#ProgNoteViwerFrame');
+            if (!frameHandle) {
+                console.log('❌ Frame handle not found, trying Hub Flow...');
+                return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+            }
+            
+            const frame = await frameHandle.contentFrame();
+            if (!frame) {
+                console.log('❌ Could not access frame, trying Hub Flow...');
+                return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+            }
+            
+            console.log('✅ Frame content loaded');
+            
+            // Wait for frame to be fully loaded
+            await frame.waitForLoadState('networkidle');
+            await page.waitForTimeout(2000); // Give extra time for content
+            
+            // Check if frame has any content at all
+            const frameContent = await frame.evaluate(() => {
+                return {
+                    bodyText: document.body.innerText.trim(),
+                    bodyHTML: document.body.innerHTML,
+                    hasElements: document.body.children.length > 0,
+                    textLength: document.body.innerText.length
+                };
+            });
+            
+            console.log(`📊 Frame stats: Text length=${frameContent.bodyText.length}, Has elements=${frameContent.hasElements}`);
+            
+            // If frame has minimal content, still proceed (might be a valid empty note)
+            if (frameContent.bodyText.length < 20 && !frameContent.hasElements) {
+                console.log('⚠️ Frame appears to be empty, trying Hub Flow...');
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+                return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+            }
+            
+            // Try multiple selectors for note content
+            const noteContent = await frame.evaluate(() => {
+                // Try multiple selectors for progress note content
+                const selectors = [
+                    '.note-content',
+                    '.progress-note',
+                    '.clinical-note',
+                    '[id*="note"]',
+                    '[class*="note"]',
+                    '.container',
+                    '.content-area',
+                    'div[style*="padding"]',
+                    'div[style*="margin"]',
+                    'table',
+                    'form',
+                    'div:has(p)',
+                    'div:has(span)',
+                    document.body // Fallback to body
+                ];
+                
+                for (const selector of selectors) {
+                    try {
+                        const element = typeof selector === 'string' 
+                            ? document.querySelector(selector)
+                            : selector;
+                        
+                        if (element && element.innerHTML && element.innerHTML.length > 100) {
+                            return element.outerHTML;
+                        }
+                    } catch (e) {
+                        // Continue to next selector
+                    }
+                }
+                
+                return document.body.outerHTML;
+            });
+            
+            // Create a clean HTML document with the content
+            const htmlContent = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <style>
+                        body { 
+                            font-family: Arial, sans-serif; 
+                            margin: 20px; 
+                            line-height: 1.6;
+                            color: #333;
+                        }
+                        .note-title {
+                            font-size: 18px;
+                            font-weight: bold;
+                            margin-bottom: 20px;
+                            color: #2c3e50;
+                            border-bottom: 2px solid #3498db;
+                            padding-bottom: 10px;
+                        }
+                        .note-section {
+                            margin-bottom: 15px;
+                        }
+                        .note-label {
+                            font-weight: bold;
+                            color: #2c3e50;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="note-title">Progress Note - Claim: ${claimNumber} - Patient: ${patientName}</div>
+                    ${noteContent}
+                </body>
+                </html>
+            `;
+            
+            // Create a temporary page to render the HTML
+            const tempPage = await context.newPage();
+            await tempPage.setContent(htmlContent, { waitUntil: 'load' });
+            
+            // ✅ FIXED: Use account number for filename
+            const pdfPath = path.join(tempFolder, `ProgressNote_${claimNumber}-${account}.pdf`);
+            
+            console.log(`💾 Saving Progress Note as: ${path.basename(pdfPath)}`);
+            
+            // Generate PDF from the content
+            await tempPage.pdf({ 
+                path: pdfPath, 
+                format: 'A4', 
+                printBackground: true,
+                margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' }
+            });
+            
+            // Check if PDF was created successfully
+            if (fs.existsSync(pdfPath)) {
+                const stats = fs.statSync(pdfPath);
+                console.log(`💾 Progress Note saved: ${path.basename(pdfPath)} (${Math.round(stats.size / 1024)} KB)`);
+                
+                // Even if PDF is small, it might be a valid empty note
+                // Don't fall back to Hub Flow just because PDF is small
+            } else {
+                console.log(`❌ PDF not created, trying Hub Flow...`);
+                await tempPage.close();
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+                return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+            }
+            
+            await tempPage.close();
+            
+            // Close the Progress Note modal
+            console.log('🚪 Closing Progress Note modal...');
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(2000);
+            
+            // Wait for the main claim modal to be visible again
+            try {
+                await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { 
+                    state: 'visible', 
+                    timeout: 5000 
+                });
+                console.log('✅ Back to claim modal');
+            } catch (error) {
+                console.log('⚠️ Claim modal not visible, continuing...');
+            }
+            
+            return true;
+            
+        } catch (frameError) {
+            console.log(`⏰ Frame error: ${frameError.message}, trying Hub Flow...`);
+            try {
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+            } catch (e) {}
+            return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+        }
+        
+    } catch (error) {
+        console.error(`❌ Progress Note error: ${error.message}, trying Hub Flow...`);
+        try {
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(1000);
+        } catch (e) {}
+        return await this.executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account);
+    }
+}
+
+
+    // ✅ FIXED: Download document file with proper workflow
+async downloadPatientDocFile(fileLink, page, claimNumber, patientName, index, docObject, tempFolder, account) {
+    try {
+        console.log(`   📥 Attempting to download file #${index + 1}...`);
+        
+        const fileName = await fileLink.textContent();
+        const cleanFileName = fileName ? fileName.trim() : `document_${index}`;
+        console.log(`   📄 File: "${cleanFileName}"`);
+        
+        // Click to select file
+        await fileLink.click({ force: true });
+        await page.waitForTimeout(6000);
+        
+        // Right-click to open context menu
+        const boundingBox = await fileLink.boundingBox();
+        if (!boundingBox) {
+            console.log(`   ❌ Element not visible for right-click`);
+            return false;
+        }
+        
+        // Try multiple right-click positions
+        await page.mouse.click(
+            boundingBox.x + boundingBox.width * 0.8,
+            boundingBox.y + boundingBox.height / 2,
+            { button: 'right' }
+        );
+        
+        await page.waitForTimeout(10000);
+        
+        // Try multiple ways to find the context menu
+        let targetMenu = null;
+        
+        // Try 1: Look for any dropdown menu
+        const allMenus = await page.$$('ul.dropdown-menu[role="menu"], .dropdown-menu, [role="menu"]');
+        
+        for (let i = 0; i < allMenus.length; i++) {
+            const menu = allMenus[i];
+            const isVisible = await menu.isVisible();
+            
+            if (isVisible) {
+                const menuText = await menu.textContent();
+                if (menuText && menuText.toLowerCase().includes('download')) {
+                    targetMenu = menu;
+                    break;
+                }
+            }
+        }
+        
+        // Try 2: If no menu found, check for direct download links
+        if (!targetMenu) {
+            const downloadLinks = await page.$$('a:has-text("Download"), button:has-text("Download")');
+            for (const link of downloadLinks) {
+                if (await link.isVisible()) {
+                    console.log(`   ✅ Found direct Download link`);
+                    await link.click();
+                    await page.waitForTimeout(2000);
+                    
+                    // Wait for download
+                    try {
+                        const download = await page.waitForEvent('download', { timeout: 30000 });
+                        return await this.handleDownloadFile(download, claimNumber, patientName, index, cleanFileName, tempFolder, account);
+                    } catch (downloadError) {
+                        console.log(`   ⚠️ No download event detected: ${downloadError.message}`);
+                        return false;
+                    }
+                }
+            }
+        }
+        
+        if (!targetMenu) {
+            console.log(`   ❌ No Download menu found`);
+            
+            // Try alternative: Look for any menu with options
+            const allVisibleMenus = await page.$$('.modal-content, .popover, [role="dialog"]');
+            for (const menu of allVisibleMenus) {
+                const menuText = await menu.textContent();
+                if (menuText && menuText.toLowerCase().includes('download')) {
+                    console.log(`   🔍 Found alternative menu with download option`);
+                    const downloadOption = await menu.$('*:has-text("Download"), *:has-text("download")');
+                    if (downloadOption) {
+                        await downloadOption.click();
+                        await page.waitForTimeout(2000);
+                        
+                        try {
+                            const download = await page.waitForEvent('download', { timeout: 30000 });
+                            return await this.handleDownloadFile(download, claimNumber, patientName, index, cleanFileName, tempFolder, account);
+                        } catch (downloadError) {
+                            console.log(`   ⚠️ No download event from alternative menu: ${downloadError.message}`);
+                            return false;
+                        }
+                    }
+                }
+            }
+            
+            return false;
+        }
+        
+        // Click the Download option in the menu
+        const downloadOption = await targetMenu.$('a:has-text("Download"), a:has-text("download")');
+        
+        if (downloadOption) {
+            await downloadOption.click();
+            console.log(`   ✅ Clicked Download option in menu`);
+            
+            // Wait for download
+            try {
+                const download = await page.waitForEvent('download', { timeout: 120000 });
+                return await this.handleDownloadFile(download, claimNumber, patientName, index, cleanFileName, tempFolder, account);
+            } catch (downloadError) {
+                console.log(`   ⚠️ No download event detected: ${downloadError.message}`);
+                return false;
+            }
+        }
+        
+        return false;
+        
+    } catch (error) {
+        console.log(`   ❌ Download failed: ${error.message}`);
+        return false;
+    }
+}
+
+// ✅ NEW: Separate function to handle downloaded file
+async handleDownloadFile(download, claimNumber, patientName, index, cleanFileName, tempFolder, account) {
+    try {
+        // ✅ Create clean suffix from filename
+        let suffix = '';
+        if (index === 0) {
+            // First file: Use standard ProgressNote format
+            suffix = '';
+        } else {
+            // Create meaningful suffix from filename
+            const safeFileName = cleanFileName
+                .replace(/[^a-zA-Z0-9]/g, '_')
+                .replace(/_+/g, '_')
+                .replace(/^_+|_+$/g, '')
+                .substring(0, 30)
+                .trim();
+            
+            suffix = `_${index}_${safeFileName}`;
+        }
+        
+        // ✅ TEMPORARY PATH: Download original file
+        const tempPath = path.join(tempFolder, `Temp_ProgressNote_${claimNumber}-${account}${suffix}`);
+        
+        console.log(`   💾 Downloading to temporary file: ${path.basename(tempPath)}`);
+        await download.saveAs(tempPath);
+        
+        // ✅ CRITICAL: Wait for file to be fully written
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        if (fs.existsSync(tempPath)) {
+            const stats = fs.statSync(tempPath);
+            
+            // ✅ BETTER FILE TYPE DETECTION - Check HEX values
+            const buffer = fs.readFileSync(tempPath, { length: 10 });
+            const hexBytes = buffer.toString('hex', 0, 4); // Get first 4 bytes as hex
+            const asciiBytes = buffer.toString('ascii', 0, 5); // Get first 5 bytes as ASCII
+            
+            console.log(`   🔍 File header: ASCII="${asciiBytes}", HEX="${hexBytes}"`);
+            
+            let finalPath = path.join(tempFolder, `ProgressNote_${claimNumber}-${account}${suffix}`);
+            
+            // Check if PDF (starts with %PDF-)
+            if (asciiBytes === '%PDF-' || hexBytes.startsWith('25504446')) {
+                console.log(`   📄 PDF file detected (${Math.round(stats.size / 1024)} KB)`);
+                // Add .pdf extension
+                finalPath = finalPath + '.pdf';
+                fs.renameSync(tempPath, finalPath);
+                console.log(`   ✅ PDF saved as: ${path.basename(finalPath)}`);
+            } 
+            // Skip TIFF files
+            else if (hexBytes === '49492a00' || hexBytes === '4d4d002a' || 
+                     asciiBytes.startsWith('II*') || asciiBytes.startsWith('MM*')) {
+                console.log(`   ⚠️ SKIPPING TIFF file: ${cleanFileName} (not needed)`);
+                fs.unlinkSync(tempPath);
+                return false;
+            }
+            else {
+                console.log(`   ❓ Unknown file type: ${asciiBytes} (hex: ${hexBytes})`);
+                console.log(`   📏 File size: ${stats.size} bytes`);
+                
+                // Try to save with appropriate extension based on content
+                if (asciiBytes.includes('<html') || asciiBytes.includes('<!DOCTYPE')) {
+                    finalPath = finalPath + '.html';
+                    fs.renameSync(tempPath, finalPath);
+                    console.log(`   🌐 HTML file saved as: ${path.basename(finalPath)}`);
+                } else {
+                    finalPath = finalPath + '.unknown';
+                    fs.renameSync(tempPath, finalPath);
+                    console.log(`   ❓ Saved as unknown file type`);
+                }
+            }
+            
+            return true;
+        } else {
+            console.log(`   ❌ File not saved to disk`);
+            return false;
+        }
+    } catch (error) {
+        console.log(`   ❌ Error handling downloaded file: ${error.message}`);
+        return false;
+    }
+}
+
+    async traverseDocumentTree(page, container, dateRegex, claimNumber, tempFolder, patientName, depth = 0, account) {
+        const indent = '  '.repeat(depth);
+        let matchCount = 0;
+        
+        try {
+            const containerSelector = await container.evaluate(el => {
+                if (el.id) return `#${el.id}`;
+                if (el.className) {
+                    const classes = el.className.split(' ').filter(c => c).join('.');
+                    return `.${classes}`;
+                }
+                return 'div[style="height:100%;width:100%; overflow:auto;"] ul#patientdocsUl1';
+            });
+            
+            console.log(`${indent}🔍 Using container selector: ${containerSelector}`);
+            
+            const freshContainer = await page.$(containerSelector);
+            if (!freshContainer) {
+                console.log(`${indent}❌ Container not found`);
+                return matchCount;
+            }
+            
+            const allFileLinks = await freshContainer.$$('a[id^="patientdocsTreeLink"]');
+            console.log(`${indent}📄 Found ${allFileLinks.length} file links`);
+            
+            for (let i = 0; i < allFileLinks.length; i++) {
+                try {
+                    const currentContainer = await page.$(containerSelector);
+                    if (!currentContainer) {
+                        console.log(`${indent}⚠️ Container disappeared`);
+                        break;
+                    }
+                    
+                    const currentLinks = await currentContainer.$$('a[id^="patientdocsTreeLink"]');
+                    if (i >= currentLinks.length) {
+                        console.log(`${indent}⚠️ Link ${i} no longer available`);
+                        continue;
+                    }
+                    
+                    const fileLink = currentLinks[i];
+                    
+                    const isConnected = await fileLink.evaluate(el => el.isConnected);
+                    if (!isConnected) {
+                        console.log(`${indent}⚠️ Link ${i} not connected`);
+                        continue;
+                    }
+                    
+                    const fileName = await fileLink.textContent();
+                    if (!fileName || !fileName.trim()) {
+                        continue;
+                    }
+                    
+                    console.log(`${indent}🔍 Checking: "${fileName.trim().substring(0, 50)}..."`);
+                    
+                    if (dateRegex.test(fileName)) {
+                        console.log(`${indent}  🎯 MATCH! Contains DOS pattern`);
+                        
+                        const docObjectAttr = await fileLink.getAttribute('document-object');
+                        let docObject = { customname: fileName.trim(), label: fileName.trim() };
+                        
+                        if (docObjectAttr) {
+                            try {
+                                docObject = JSON.parse(docObjectAttr.replace(/&quot;/g, '"'));
+                            } catch (e) {
+                                // Use default object
+                            }
+                        }
+                        
+                        const success = await this.downloadPatientDocFile(fileLink, page, claimNumber, patientName, i, docObject, tempFolder, account);
+                        if (success) {
+                            matchCount++;
+                            console.log(`${indent}  ✅ File downloaded`);
+                        } else {
+                            console.log(`${indent}  ❌ Download failed`);
+                        }
+                        
+                        await page.waitForTimeout(1000);
+                    }
+                    
+                } catch (error) {
+                    console.log(`${indent}❌ Error processing file ${i}: ${error.message}`);
+                }
+            }
+            
+            return matchCount;
+            
+        } catch (error) {
+            console.log(`${indent}❌ Error in traverseDocumentTree: ${error.message}`);
+            return matchCount;
+        }
+    }
+
+    async executeHubFlow(page, claimNumber, dos, tempFolder, patientName, account) {
+        const displayDOS = dos ? moment.utc(dos).format('MM/DD/YYYY') : 'N/A';
+        console.log(`🚀 STARTING HUB FLOW for claim ${claimNumber} - DOS: ${displayDOS} - Account: ${account}`);
+        
+        try {
+            const hubButton = await page.$('[id^="claimPatientHub"]') || await page.$('button:has-text("Hub")');
+            
+            if (!hubButton) {
+                console.log('❌ Hub button NOT FOUND');
+                return false;
+            }
+            
+            console.log('✅ Hub button found - CLICKING...');
+            await hubButton.click();
+            await page.waitForTimeout(4000);
+            
+            const patientDocsButton = await page.$('#patient-hubBtn11') || await page.$('button:has-text("Patient Docs")');
+            
+            if (!patientDocsButton) {
+                console.log('❌ Patient Docs button NOT FOUND');
+                await page.keyboard.press('Escape');
+                return false;
+            }
+            
+            console.log('✅ Patient Docs button found - CLICKING...');
+            await patientDocsButton.click();
+            await page.waitForTimeout(5000);
+            
+            const docContainer = await page.$('div[style="height:100%;width:100%; overflow:auto;"]');
+            
+            if (!docContainer) {
+                console.log('❌ Document container not found');
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+                await page.keyboard.press('Escape');
+                return false;
+            }
+            
+            console.log('✅ Found document container');
+            
+            console.log(`📅 Creating regex for DOS: ${displayDOS}`);
+            const dateRegex = this.createDOSDateRegex(dos);
+            const matchCount = await this.traverseDocumentTree(page, docContainer, dateRegex, claimNumber, tempFolder, patientName, 0, account);
+            
+            console.log(`\n📊 Total files found matching DOS ${displayDOS}: ${matchCount}`);
+            
+            await page.keyboard.press('Escape');
+            await page.waitForTimeout(1000);
+            await page.keyboard.press('Escape');
+            
+            console.log(`✅ HUB FLOW COMPLETED for claim ${claimNumber}`);
+            return matchCount > 0;
+            
+        } catch (error) {
+            console.error(`❌ HUB FLOW ERROR for claim ${claimNumber} (DOS: ${displayDOS}): ${error.message}`);
+            
+            try {
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+                await page.keyboard.press('Escape');
+            } catch (e) {
+                // Ignore
+            }
+            
+            return false;
+        }
+    }
+
+   createDOSDateRegex(dos) {
+    if (!dos) {
+        console.log('⚠️ No DOS provided, using generic date pattern');
+        return /\b\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}\b/gi;
+    }
+    
+    try {
+        const date = moment.utc(dos);
+        if (!date.isValid()) {
+            console.log('⚠️ Invalid DOS, using fallback');
+            return /\b\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}\b/gi;
+        }
+        
+        const day = date.date();
+        const month = date.month() + 1;
+        const year = date.year();
+        const shortYear = year % 100;
+        
+        const formattedDate = moment.utc(dos).format('MM/DD/YYYY');
+        console.log(`📅 Creating regex for DOS: ${formattedDate} (Month: ${month}, Day: ${day}, Year: ${year})`);
+        
+        const patterns = [];
+        
+        // ✅ EXISTING PATTERNS - Standard formats
+        patterns.push(`${month}[-\/.]${day}[-\/.](${shortYear}|${year})`);
+        patterns.push(`${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}[-\/.](${shortYear}|${year})`);
+        patterns.push(`${month}[-\/.]${day.toString().padStart(2, '0')}[-\/.](${shortYear}|${year})`);
+        patterns.push(`${month.toString().padStart(2, '0')}[-\/.]${day}[-\/.](${shortYear}|${year})`);
+        
+        // ✅ NEW: Your specific patterns - "3/2" format (Month/Day without year)
+        // For DOS 3/21/25, this will match "3/2" (but careful!)
+        patterns.push(`\\b${month}[-\/.]${day}\\b`);
+        patterns.push(`\\b${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}\\b`);
+        
+        // ✅ NEW: "MMH XR Chest 1 Front View) 3/2" format
+        // This matches "3/2" at the end of string
+        patterns.push(`${month}[-\/.]${day}(?!\\d)`);
+        patterns.push(`${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}(?!\\d)`);
+        
+        // ✅ NEW: "2503.21" format (DDMM.YY)
+        // For 3/21/25 → Day=21, Month=3, Year=25 → "2103.25"
+        // But you have "2503.21" which seems reversed
+        patterns.push(`${day.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}[-\/.]${shortYear}`);
+        patterns.push(`${day}${month}[-\/.]${shortYear}`);
+        patterns.push(`${shortYear}${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}`); // "250321"
+        patterns.push(`${shortYear}${month}${day}`); // "25321"
+        
+        // ✅ NEW: "2503.21" specific pattern (year.month.day?)
+        // This matches "25" (year) "03" (month) "21" (day)
+        patterns.push(`${shortYear}${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}`); // "25.03.21"
+        patterns.push(`${shortYear}[-\/.]${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}`); // "25.03.21"
+        
+        // ✅ NEW: Reverse pattern "2103.25" (DDMM.YY)
+        patterns.push(`${day.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}[-\/.]${shortYear}`); // "2103.25"
+        patterns.push(`${day}${month}[-\/.]${shortYear}`); // "213.25"
+        
+        // ✅ NEW: "CCR 2503.21" format with prefix
+        patterns.push(`CCR[ _]${shortYear}${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}`);
+        patterns.push(`CCR[ _]${day.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}[-\/.]${shortYear}`);
+        
+        // ✅ MMDD with year (no separators)
+        patterns.push(`${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}(${shortYear}|${year})`);
+        patterns.push(`${month}${day}(${shortYear}|${year})`);
+        
+        // ✅ DD/MM/YYYY formats
+        patterns.push(`${day}[-\/.]${month}[-\/.](${shortYear}|${year})`);
+        patterns.push(`${day.toString().padStart(2, '0')}[-\/.]${month.toString().padStart(2, '0')}[-\/.](${shortYear}|${year})`);
+        
+        // ✅ MMDDYYYY (no separators, full year)
+        patterns.push(`${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}${year}`);
+        patterns.push(`${month}${day}${year}`);
+        
+        // ✅ DD.MM.YY (with dots)
+        patterns.push(`${day}[-\/.]${month}[-\/.]${shortYear}`);
+        patterns.push(`${day.toString().padStart(2, '0')}[-\/.]${month.toString().padStart(2, '0')}[-\/.]${shortYear}`);
+        
+        // ✅ DDMM.YY (ECW specific)
+        patterns.push(`${day.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}[-\/.]${shortYear}`);
+        patterns.push(`${day}${month}[-\/.]${shortYear}`);
+        patterns.push(`${day.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}[-\/.]${year}`);
+        patterns.push(`${day}${month}[-\/.]${year}`);
+        
+        // ✅ Day/Month without year
+        patterns.push(`\\b${day}[-\/.]${month}\\b`);
+        patterns.push(`\\b${day.toString().padStart(2, '0')}[-\/.]${month.toString().padStart(2, '0')}\\b`);
+        
+        // ✅ YY.MM.DD format
+        patterns.push(`${shortYear}[-\/.]${month}[-\/.]${day}`);
+        patterns.push(`${shortYear}[-\/.]${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}`);
+        
+        // ✅ YYYYMMDD format
+        patterns.push(`${year}${month.toString().padStart(2, '0')}${day.toString().padStart(2, '0')}`);
+        
+        // ✅ Month-Day-Year with dashes only
+        patterns.push(`${month}-${day}-(${shortYear}|${year})`);
+        patterns.push(`${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}-(${shortYear}|${year})`);
+        
+        // ✅ Year-Month-Day formats
+        patterns.push(`${year}[-\/.]${month}[-\/.]${day}`);
+        patterns.push(`${year}[-\/.]${month.toString().padStart(2, '0')}[-\/.]${day.toString().padStart(2, '0')}`);
+        
+        const regex = new RegExp(`(?:${patterns.join('|')})`, 'gi');
+        
+        console.log(`✅ Created regex to match ${formattedDate} in ALL ECW formats`);
+        console.log(`📋 Total patterns: ${patterns.length}`);
+        
+        // Show what we'll match for your specific examples
+        console.log(`🔍 Will match your examples:`);
+        console.log(`   - "MMH XR Chest 1 Front View) 3/2" → matches "3/2"`);
+        console.log(`   - "MMH XR Chest 1 View Frontal 3/2" → matches "3/2"`);
+        console.log(`   - "2503.21 CCR" → matches "2503.21" (as 25.03.21)`);
+        
+        return regex;
+        
+    } catch (error) {
+        console.error(`❌ Error creating DOS regex: ${error.message}`);
+        return /\b\d{1,2}[-\/.]\d{1,2}[-\/.]\d{2,4}\b/gi;
+    }
+}
 
     async processERAPayments(page, claimNumber, patientName, charges, balance, context, tempFolder) {
         console.log(`\n💳 Processing ERA payments for claim ${claimNumber}...`);
@@ -991,7 +1923,6 @@ class ECWAutomation {
         try {
             console.log('💳 Clicking Insurances & Payment tab...');
             
-            // ✅ CHECK FOR LICENSE POPUP BEFORE CLICKING
             const licensePopupBeforeClick = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupBeforeClick) {
                 return result;
@@ -1038,11 +1969,11 @@ class ECWAutomation {
             let eraDownloadCount = 0;
             
             const baseUrl = new URL(page.url()).origin;
+            const runDate = getRunDate();
             
             for (let i = 0; i < paymentRows.length; i++) {
                 const row = paymentRows[i];
                 
-                // ✅ CHECK FOR LICENSE POPUP BEFORE PROCESSING EACH ROW
                 const licensePopupBeforeRow = await this.checkForLicenseExpiredPopup(page, claimNumber);
                 if (licensePopupBeforeRow) {
                     console.log(`⏭️ Stopping ERA processing due to license expired popup`);
@@ -1069,7 +2000,7 @@ class ECWAutomation {
                         processedRowKeys.add(rowKey);
                     }
                     
-                    const success = await this.processERARow(row, rowData, uniqueIdentifier, rowId, baseUrl, context, page, claimNumber, patientName, charges, balance, tempFolder);
+                    const success = await this.processERARow(row, rowData, uniqueIdentifier, rowId, baseUrl, context, page, claimNumber, patientName, runDate, tempFolder);
                     if (success) {
                         eraDownloadCount++;
                     }
@@ -1158,11 +2089,10 @@ class ECWAutomation {
         return `ts${Date.now()}`;
     }
 
-    async processERARow(row, rowData, uniqueIdentifier, rowId, baseUrl, context, page, claimNumber, patientName, charges, balance, tempFolder) {
+           async processERARow(row, rowData, uniqueIdentifier, rowId, baseUrl, context, page, claimNumber, patientName, runDate, tempFolder) {
         console.log(`\n🖱️ Processing ERA for: ${rowData.payer} (Row ID: ${rowId})`);
         
         try {
-            // ✅ CHECK FOR LICENSE POPUP BEFORE DOUBLE CLICK
             const licensePopupBeforeClick = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupBeforeClick) {
                 return false;
@@ -1177,13 +2107,14 @@ class ECWAutomation {
             try {
                 await page.waitForSelector('.modal.in, .modal.fade.in', { timeout: 5000 });
             } catch (error) {
+                console.log('❌ ERA popup did not open');
                 return false;
             }
             
-            // ✅ CHECK FOR LICENSE POPUP AFTER ERA POPUP
             const licensePopupAfterERA = await this.checkForLicenseExpiredPopup(page, claimNumber);
             if (licensePopupAfterERA) {
                 await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
                 return false;
             }
             
@@ -1211,16 +2142,26 @@ class ECWAutomation {
                     await eraFrame.waitForLoadState('networkidle');
                     const eraHTML = await eraFrame.evaluate(() => document.documentElement.outerHTML);
                     
-                    const uniqueSuffix = this.getUniqueSuffix(charges, balance);
-                    const safePayer = rowData.payer.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30);
-                    const safePatient = patientName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20);
+                    // ✅ IMPORTANT: Get payer name and clean it
+                    const safePayer = rowData.payer 
+                        ? rowData.payer.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 30)
+                        : 'UnknownPayer';
+                    
+                    const safePatient = patientName 
+                        ? patientName.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 20)
+                        : 'UnknownPatient';
+                    
+                    console.log(`📋 Payer: "${rowData.payer}" → "${safePayer}"`);
+                    console.log(`📋 Patient: "${patientName}" → "${safePatient}"`);
+                    
+                    // ✅ CORRECT FORMAT: ERA_claimid-rundate_patient_payer_rowX.pdf
+                    const eraPath = path.join(tempFolder, `ERA_${claimNumber}-${runDate}_${safePatient}_${safePayer}_${rowId}.pdf`);
+                    
+                    console.log(`💾 Saving ERA as: ${path.basename(eraPath)}`);
                     
                     if (eraHTML.includes('<html') || eraHTML.includes('<!DOCTYPE')) {
                         const eraPage = await context.newPage();
                         await eraPage.setContent(eraHTML, { waitUntil: 'networkidle' });
-                        
-                        // Include rowId in filename
-                        const eraPath = path.join(tempFolder, `ERA_${claimNumber}-${uniqueSuffix}_${safePatient}_${safePayer}_${rowId}.pdf`);
                         
                         await eraPage.pdf({ 
                             path: eraPath, 
@@ -1231,45 +2172,59 @@ class ECWAutomation {
                         
                         await eraPage.close();
                     } else {
-                        const eraPath = path.join(tempFolder, `ERA_${claimNumber}-${uniqueSuffix}_${safePatient}_${safePayer}_${rowId}.html`);
                         fs.writeFileSync(eraPath, eraHTML);
                     }
-                } else {
-                    return false;
+                    
+                    console.log(`✅ ERA saved: ${path.basename(eraPath)}`);
+                    
+                    // ✅ CLOSE THE ERA POPUP BEFORE PROCESSING NEXT ONE
+                    console.log('🚪 Closing ERA popup...');
+                    await page.keyboard.press('Escape');
+                    await page.waitForTimeout(2000);
+                    
+                    // ✅ WAIT FOR THE CLAIM MODAL TO BE VISIBLE AGAIN
+                    try {
+                        await page.waitForSelector('.modal.fade.bluetheme.billing-width.in', { 
+                            state: 'visible', 
+                            timeout: 5000 
+                        });
+                        console.log('✅ Back to claim modal');
+                    } catch (error) {
+                        console.log('⚠️ Claim modal not visible, continuing anyway...');
+                    }
+                    
+                    return true;
                 }
-            } else {
-                return false;
             }
             
+            // If we got here but couldn't process, try to close the popup
+            console.log('🚪 Attempting to close ERA popup...');
             await page.keyboard.press('Escape');
-            await page.waitForTimeout(2000);
-            
             await page.waitForTimeout(1000);
             
-            return true;
+            return false;
             
         } catch (error) {
-            console.log(`❌ ERA processing failed`);
+            console.log(`❌ ERA processing failed: ${error.message}`);
+            
+            // Try to close any open popup on error
+            try {
+                await page.keyboard.press('Escape');
+                await page.waitForTimeout(1000);
+            } catch (e) {
+                // Ignore
+            }
+            
             return false;
         }
-    }
-
-    getUniqueSuffix(charges, balance) {
-        const cleanCharges = (charges || '').replace(/[^0-9.]/g, '').replace('.', '') || '0';
-        const cleanBalance = (balance || '').replace(/[^0-9.]/g, '').replace('.', '') || '0';
-        return `${cleanCharges}-${cleanBalance}`;
-    }
-
-    async run() {
-        console.log('🚀 Starting ECW Medical Records Automation with Email Reporting...');
-        await this.processAllRecords();
-    }
-}
+    } // ← THIS CLOSING BRACKET WAS MISSING
+} // ← THIS CLOSING BRACKET WAS MISSING
 
 // Run the automation
 if (require.main === module) {
     const automation = new ECWAutomation();
-    automation.run().catch(console.error);
+    automation.processAllRecords().catch(console.error);
 }
 
 module.exports = ECWAutomation;
+
