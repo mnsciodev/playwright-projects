@@ -272,7 +272,8 @@ async function readClaimsFromExcel(filePath) {
         const searchRecords = await readClaimsFromExcel('AvailiyClaimStatusAmbetterHealth.xlsx');
         console.log(`📘 Excel records loaded: ${searchRecords.length}`);
 
-        for (const record of searchRecords) {
+        for (const [index, record] of searchRecords.entries()) {
+
 
             await frame.locator("#subscriberMemberId").fill("")
             await frame.locator("#patientLastName").fill("");
@@ -303,15 +304,8 @@ async function readClaimsFromExcel(filePath) {
                 DateOfServiceEnd
             }
 
-            console.log(`🔍 Processing MemberId: ${MemberId}, ${JSON.stringify(InputData)}`);
-            // var MemberId = "87978"
-            // var DateOfService = "01/30/2025"
-            // var PatientLastName = "svsdv Avila De Tun"
-            // var PatientFirstName = "Kathersdine"
-            // var DateofBirth = "2000-11-09"
-
-
-
+            console.log(`Processing MemberId ${index} ${MemberId}, ${JSON.stringify(InputData)} `);
+            
             await frame.locator("#subscriberMemberId").fill(InputData.MemberId)
             await frame.locator("#patientLastName").fill(InputData.PatientLastName);
             await frame.locator("#patientFirstName").fill(InputData.PatientFirstName);
@@ -330,17 +324,9 @@ async function readClaimsFromExcel(filePath) {
                     alertText.includes('claim') && alertText.includes('not found') ||
                     alertText.includes('could not find any results')
                 ) {
-                    console.warn(
-                        'No data found for the given search criteria',
-                        JSON.stringify(InputData)
-                    );
+                    console.warn('NO Data',JSON.stringify(InputData),alertText);
 
-                    FinalData.push({
-                        ...InputData,
-                        claimStatus: 'No Data Found'
-                    });
-
-                    console.warn(alertText);
+                    FinalData.push({...InputData,claimStatus: 'No Data Found'});
                     continue;
                 }
 
@@ -349,17 +335,44 @@ async function readClaimsFromExcel(filePath) {
                 // Means search probably returned results
             }
 
+            // Wait for EITHER results OR alert
+            await Promise.race([
+                frame.waitForSelector('#claimsTable', { timeout: 20000 }),
+                frame.waitForSelector('.alert, [role="alert"]', { timeout: 20000 })
+            ]);
+
+            // Now check alert first
+            if (await alertBox.count() > 0) {
+                const alertText = (await alertBox.allInnerTexts()).join(' ').toLowerCase();
+
+                console.warn('⚠️ Alert shown:', alertText);
+
+                FinalData.push({
+                    ...InputData,
+                    FinalClaimStatus: 'NO DATA FOUND'
+                });
+
+                continue;
+            }
             const rows = frame.locator('#claimsTable tbody tr');
-            await rows.first().waitFor({ state: 'visible', timeout: 60000 });
-
+            //await rows.first().waitFor({ state: 'visible', timeout: 60000 });
             const rowCount = await rows.count();
+            if (rowCount === 0) {
+                console.warn(`⚠️ No claims table found for MemberId ${MemberId}`);
 
+                FinalData.push({
+                    ...InputData,
+                    FinalClaimStatus: 'NO CLAIM TABLE'
+                });
+
+                continue; // ✅ move to next Excel record
+            }
             for (let i = 0; i < rowCount; i++) {
                 const row = rows.nth(i);
                 const text = await row.innerText();
 
                 if (text.includes(expectedFrom) && text.includes(expectedTo)) {
-                    console.log(`Matching row found at index ${i}`);
+                    console.log(`Claims Table Index ${i}`);
                     await row.click();
 
                     await frame.waitForSelector(
@@ -393,7 +406,7 @@ async function readClaimsFromExcel(filePath) {
                         totalRows = await allRows.count();
 
                         for (let j = 0; j < totalRows; j++) {
-                            console.log("Get Line Level", j)
+                            console.log("Line Level Index", j)
                             const row = allRows.nth(j);
 
                             const serviceDatesText = await row.locator('td').nth(3).innerText();
