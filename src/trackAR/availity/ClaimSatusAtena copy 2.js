@@ -56,7 +56,7 @@ async function exportToExcel(finalData) {
     ];
 
     finalData.forEach(claim => {
-        (claim.ClaimLines || []).forEach(line => {
+        claim.ClaimLines.forEach(line => {
             detailSheet.addRow({
                 ErrorDescription: line.ErrorDescription,
                 LineBilledAmount: line.LineBilledAmount,
@@ -328,8 +328,7 @@ async function readClaimsFromExcel(filePath) {
 
                     FinalData.push({
                         ...InputData,
-                        FinalClaimStatus: 'NO DATA FOUND',
-                        ClaimLines: []
+                        FinalClaimStatus: 'NO DATA FOUND'
                     });
 
                     continue; // ✅ next Excel record
@@ -348,8 +347,7 @@ async function readClaimsFromExcel(filePath) {
 
                 FinalData.push({
                     ...InputData,
-                    FinalClaimStatus: 'NO CLAIM TABLE',
-                    ClaimLines: []
+                    FinalClaimStatus: 'NO CLAIM TABLE'
                 });
 
                 continue;
@@ -361,8 +359,7 @@ async function readClaimsFromExcel(filePath) {
 
                 FinalData.push({
                     ...InputData,
-                    FinalClaimStatus: 'NO CLAIM TABLE',
-                    ClaimLines: []
+                    FinalClaimStatus: 'NO CLAIM TABLE'
                 });
 
                 continue; // ✅ move to next Excel record
@@ -375,37 +372,6 @@ async function readClaimsFromExcel(filePath) {
                     console.log(`Claims Table Index ${i}`);
                     await row.click();
 
-                    /* ===== BLOCKING PAYER ALERT CHECK ===== */
-                    const payerAlert = frame.locator('[data-testid="payerAlert"]');
-
-                    try {
-                        await payerAlert.waitFor({ state: 'visible', timeout: 5000 });
-
-                        const alertText = (await payerAlert.innerText()).trim();
-
-                        console.warn('⚠️ PAYER ALERT:', alertText);
-
-                        FinalData.push({
-                            ...InputData,
-                            FinalClaimStatus: 'PAYER CONFIGURATION WARNING',
-                            AlertMessage: alertText,
-                            ClaimLines: []
-                        });
-
-                        // try to close alert (optional)
-                        try {
-                            await payerAlert.locator('button.close').click({ timeout: 2000 });
-                        } catch {}
-
-                        // return to results safely
-                        try {
-                            await frame.locator('#rtrn2Rslts').first().click({ timeout: 5000 });
-                        } catch {}
-
-                        continue; // ✅ skip waiting for claim panel
-                    } catch {
-                        // ✅ No payer alert → continue normally
-                    }
                     await frame.waitForSelector(
                         '[data-testid="testClaim NumberPanel"]',
                         { timeout: 60000 }
